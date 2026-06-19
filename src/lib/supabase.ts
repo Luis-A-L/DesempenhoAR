@@ -56,7 +56,7 @@ export const signInWithGoogle = async () => {
           provider: 'google',
           options: {
                   scopes: 'https://www.googleapis.com/auth/spreadsheets.readonly',
-                  redirectTo: window.location.origin,
+                  redirectTo: window.location.origin + window.location.pathname,
                   queryParams: {
                             access_type: 'offline',
                             prompt: 'consent',
