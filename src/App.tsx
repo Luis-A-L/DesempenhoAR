@@ -1,0 +1,4401 @@
+import React, { useState, useEffect, useMemo } from "react";
+import {
+  db,
+  doc,
+  setDoc,
+  collection,
+  getDocs,
+  getDoc,
+  updateDoc,
+  deleteDoc,
+  addDoc,
+  writeBatch,
+  query,
+  where,
+  googleSignIn,
+  logout,
+  initAuth,
+  getAccessToken,
+  seedDatabaseIfEmpty,
+  batchUpsertEstagiarios,
+  batchUpsertEntries,
+  subscribeToEstagiarios,
+  subscribeToEntries,
+} from "./lib/stubs";
+import { Estagiario, ProductivityEntry, INITIAL_ESTAGIARIOS } from "./lib/types";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Line,
+  ComposedChart,
+} from "recharts";
+import {
+  Plus,
+  Users,
+  TrendingUp,
+  Calendar,
+  ArrowRight,
+  Search,
+  Trash2,
+  Edit3,
+  Grid,
+  List,
+  Check,
+  Clock,
+  CalendarDays,
+  UserPlus,
+  X,
+  Award,
+  Sliders,
+  HelpCircle,
+  FileText,
+  BarChart2,
+  ChevronDown,
+  ChevronUp,
+  CheckCircle2,
+  Bell,
+  Zap,
+  Lock,
+} from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+
+export default function App() {
+  // Date Helpers
+  const getCurrentMonth = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  };
+
+  const getCurrentDate = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  const [estagiarios, setEstagiarios] = useState<Estagiario[]>([]);
+  const [entries, setEntries] = useState<ProductivityEntry[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [currentTime, setCurrentTime] = useState<Date>(new Date());
+
+  // Navigation / Tabs
+  const [activeTab, setActiveTab] = useState<"dashboard" | "matrix">(
+    "dashboard",
+  );
+  const [teamSortConfig, setTeamSortConfig] = useState<{
+    key: string;
+    dir: "asc" | "desc";
+  }>({ key: "totalAnalyzed", dir: "desc" });
+
+  // Filters
+  const [selectedMonth, setSelectedMonth] = useState<string>(getCurrentMonth());
+  const [filterQuery, setFilterQuery] = useState<string>("");
+
+  // Modals & Drawers
+  const [isLaunchModalOpen, setIsLaunchModalOpen] = useState<boolean>(false);
+  const [isAddEstagiarioOpen, setIsAddEstagiarioOpen] =
+    useState<boolean>(false);
+  const [selectedEstagiarioDetail, setSelectedEstagiarioDetail] = useState<
+    string | null
+  >(null);
+
+  // Form State - New Entry
+  const [formEstagiarioId, setFormEstagiarioId] = useState<string>("");
+  const [formDate, setFormDate] = useState<string>(getCurrentDate());
+  const [formCount, setFormCount] = useState<number>(0);
+  const [formEditingId, setFormEditingId] = useState<string | null>(null);
+
+  // Form State - New Estagiario
+  const [newEstagiarioName, setNewEstagiarioName] = useState<string>("");
+  const [newEstagiarioId, setNewEstagiarioId] = useState<string>("");
+  const [newEstagiarioRole, setNewEstagiarioRole] =
+    useState<string>("graduacao");
+  const [newEstagiarioDailyGoal, setNewEstagiarioDailyGoal] =
+    useState<number>(25);
+  const [newEstagiarioMatricula, setNewEstagiarioMatricula] =
+    useState<string>("");
+
+  // Edit Estagiario Cadastre state
+  const [isEditingCadastre, setIsEditingCadastre] = useState<boolean>(false);
+  const [editEstagiarioName, setEditEstagiarioName] = useState<string>("");
+  const [editEstagiarioRole, setEditEstagiarioRole] =
+    useState<string>("graduacao");
+  const [editEstagiarioDailyGoal, setEditEstagiarioDailyGoal] =
+    useState<number>(25);
+  const [editEstagiarioMatricula, setEditEstagiarioMatricula] =
+    useState<string>("");
+
+  // Loading & Seeding Status
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+
+  // Google Sheets Sync State
+  const DEFAULT_SHEET_URL =
+    "https://docs.google.com/spreadsheets/d/1hTAx1DO1x4rI8vJ0IQUKEyZqrws2FtcJMSPwFtt-r78/edit?pli=1&gid=548073705#gid=548073705";
+  const [isSheetsModalOpen, setIsSheetsModalOpen] = useState<boolean>(false);
+  const [spreadsheetUrl, setSpreadsheetUrl] =
+    useState<string>(DEFAULT_SHEET_URL);
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(true);
+  const [lastSyncTime, setLastSyncTime] = useState<string>("");
+  const [syncingSheets, setSyncingSheets] = useState<boolean>(false);
+  const [previewEntries, setPreviewEntries] = useState<
+    Omit<ProductivityEntry, "id">[]
+  >([]);
+  const [previewEstagiariosToCreate, setPreviewEstagiariosToCreate] = useState<
+    string[]
+  >([]);
+  const [previewEstagiariosDetailed, setPreviewEstagiariosDetailed] = useState<
+    Estagiario[]
+  >([]);
+  const [sheetsMessage, setSheetsMessage] = useState<string>("");
+  const [sheetSyncError, setSheetSyncError] = useState<string>("");
+  const [pasteDataText, setPasteDataText] = useState<string>("");
+
+  // Toast notification state and safe non-blocking iframe-friendly alert shadowing
+  const [toast, setToast] = useState<{
+    message: string;
+    type: "success" | "error" | "info";
+  } | null>(null);
+
+  const showToast = (
+    message: string,
+    type: "success" | "error" | "info" = "info",
+  ) => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast((prev) => (prev && prev.message === message ? null : prev));
+    }, 6000);
+  };
+
+  const alert = (message: string) => {
+    let type: "success" | "error" | "info" = "info";
+    const lower = message.toLowerCase();
+    if (
+      lower.includes("sucesso") ||
+      lower.includes("concluído") ||
+      lower.includes("salvo") ||
+      lower.includes("sincronizados") ||
+      lower.includes("removido")
+    ) {
+      type = "success";
+    } else if (
+      lower.includes("erro") ||
+      lower.includes("falha") ||
+      lower.includes("inválida") ||
+      lower.includes("atenção") ||
+      lower.includes("não foi possível") ||
+      lower.includes("já existe")
+    ) {
+      type = "error";
+    }
+    showToast(message, type);
+  };
+
+  // Google Auth integration states
+  const [googleUser, setGoogleUser] = useState<any>(null);
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const [isLoggingInGoogle, setIsLoggingInGoogle] = useState<boolean>(false);
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
+  const [hasAutoSyncedOnStartup, setHasAutoSyncedOnStartup] =
+    useState<boolean>(false);
+  const [hasSpreadsheetAccess, setHasSpreadsheetAccess] = useState<
+    boolean | null
+  >(null);
+
+  // Notifications
+  const previousTodayCounts = React.useRef<Record<string, number>>({});
+  const [notifications, setNotifications] = useState<any[]>([]);
+
+  // Pagination
+  const [historyPage, setHistoryPage] = useState<number>(1);
+  const itemsPerPage = 15;
+
+  // Monitor Firebase Auth status
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setGoogleToken(token);
+        setIsAuthLoading(false);
+      },
+      () => {
+        setGoogleUser(null);
+        setGoogleToken(null);
+        setHasSpreadsheetAccess(null);
+        setIsAuthLoading(false);
+      },
+    );
+    return () => {
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
+  }, []);
+
+  const handleGoogleLogin = async () => {
+    setIsLoggingInGoogle(true);
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setGoogleUser(result.user);
+        setGoogleToken(result.accessToken);
+        // If there's an existing URL, sync it instantly!
+        if (spreadsheetUrl) {
+          triggerSheetsSync(spreadsheetUrl, estagiarios);
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert(
+        "Falha ao se conectar com a conta do Google: " + (err.message || err),
+      );
+    } finally {
+      setIsLoggingInGoogle(false);
+    }
+  };
+
+  const handleGoogleLogout = async () => {
+    await logout();
+    setGoogleUser(null);
+    setGoogleToken(null);
+  };
+
+  // Time Tracker Effect
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Initialize edit fields when an estagiario is selected
+  useEffect(() => {
+    if (selectedEstagiarioDetail) {
+      const detailed = estagiarios.find(
+        (a) => a.id === selectedEstagiarioDetail,
+      );
+      if (detailed) {
+        setEditEstagiarioName(detailed.name);
+        setEditEstagiarioRole(
+          detailed.role === "pos_graduacao" ? "pos_graduacao" : "graduacao",
+        );
+        setEditEstagiarioDailyGoal(
+          detailed.dailyGoal ?? (detailed.role === "pos_graduacao" ? 30 : 25),
+        );
+      }
+      setIsEditingCadastre(false);
+    }
+  }, [selectedEstagiarioDetail, estagiarios]);
+
+  // Fetch Data
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+
+      // 1. Carregar estagiários
+      const estagiariosSnap = await getDocs(collection(db, "estagiarios"));
+      const estagiariosList: Estagiario[] = [];
+      estagiariosSnap.forEach((docSnap) => {
+        estagiariosList.push({ id: docSnap.id, ...docSnap.data() } as Estagiario);
+      });
+      estagiariosList.sort((a, b) => a.name.localeCompare(b.name));
+      setEstagiarios(estagiariosList);
+
+      // 2. Carregar entradas de produtividade
+      const entriesSnap = await getDocs(collection(db, "productivityEntries"));
+      const entriesList: ProductivityEntry[] = [];
+      const today = getCurrentDate();
+
+      entriesSnap.forEach((docSnap) => {
+        const data = {
+          id: docSnap.id,
+          ...docSnap.data(),
+        } as ProductivityEntry;
+        if (data.date <= today) {
+          entriesList.push(data);
+        }
+      });
+      setEntries(entriesList);
+
+      // 3. Carregar configurações da planilha (somente leitura — anon pode ler)
+      const settingsSnap = await getDoc(doc(db, "settings", "googleSheet"));
+      if (settingsSnap.exists()) {
+        const settingsData = settingsSnap.data();
+        setSpreadsheetUrl(settingsData.url || DEFAULT_SHEET_URL);
+        setAutoSyncEnabled(
+          settingsData.autoSync !== undefined ? settingsData.autoSync : true,
+        );
+        setLastSyncTime(settingsData.lastSync || "");
+      }
+      // Não tenta criar settings se não existir — o usuário autenticado fará isso depois
+    } catch (error) {
+      console.error("Erro ao carregar dados do Supabase:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+
+
+  // Google Sheets & Clipboard CSV/TSV Parser (Supports Multiple Tabs: Controle and Estagiários)
+  const parseSheetData = (
+    rawData: string | { [key: string]: string },
+    currentEstagiarios: Estagiario[],
+  ) => {
+    const normalizeText = (text: string) =>
+      text
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim();
+
+    const findEstagiarioId = (name: string): string | null => {
+      const normName = normalizeText(name);
+      const found = currentEstagiarios.find(
+        (a) => normalizeText(a.name) === normName,
+      );
+      return found ? found.id : null;
+    };
+
+    const translateMonthToNum = (m: string): string => {
+      const norm = m
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .substring(0, 3);
+      const months: { [key: string]: string } = {
+        jan: "01",
+        fev: "02",
+        mar: "03",
+        abr: "04",
+        mai: "05",
+        jun: "06",
+        jul: "07",
+        ago: "08",
+        set: "09",
+        out: "10",
+        nov: "11",
+        dez: "12",
+        "01": "01",
+        "02": "02",
+        "03": "03",
+        "04": "04",
+        "05": "05",
+        "06": "06",
+        "07": "07",
+        "08": "08",
+        "09": "09",
+        "10": "10",
+        "11": "11",
+        "12": "12",
+      };
+      return months[norm] || m;
+    };
+
+    const parseDateToISO = (dateStr: string): string | null => {
+      let cleaned = dateStr.trim();
+      if (!cleaned) return null;
+
+      // Se tiver data e hora (ex: "18/06/2026 12:00:00" ou "18/06/26 12:00"), pega apenas a data
+      if (cleaned.includes(" ")) {
+        cleaned = cleaned.split(" ")[0].trim();
+      }
+
+      // Se for YYYY-MM-DD
+      if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
+
+      // Se for formato com traço (ex: YYYY-M-D ou DD-MM-[YY]YY)
+      const dashParts = cleaned.split("-");
+      if (dashParts.length === 3) {
+        const [p1, p2, p3] = dashParts;
+        if (p1.length === 4) {
+          return `${p1}-${p2.padStart(2, "0")}-${p3.padStart(2, "0")}`;
+        } else if (p3.length === 4 || p3.length === 2) {
+          const year = p3.length === 2 ? `20${p3}` : p3;
+          const month = translateMonthToNum(p2);
+          return `${year}-${month.padStart(2, "0")}-${p1.padStart(2, "0")}`;
+        }
+      }
+
+      // Se for formato com barras (ex: DD/MM/YYYY ou DD/MM/YY)
+      const slashParts = cleaned.split("/");
+      if (slashParts.length === 3) {
+        const [day, monthStr, yearStr] = slashParts;
+        const year = yearStr.length === 2 ? `20${yearStr}` : yearStr;
+        const month = translateMonthToNum(monthStr);
+        const padM = month.padStart(2, "0");
+        const padD = day.padStart(2, "0");
+        if (
+          year.length === 4 &&
+          !isNaN(parseInt(year, 10)) &&
+          !isNaN(parseInt(padM, 10)) &&
+          !isNaN(parseInt(padD, 10))
+        ) {
+          return `${year}-${padM}-${padD}`;
+        }
+      }
+
+      return null;
+    };
+
+    if (!rawData) {
+      return {
+        success: false,
+        entries: [],
+        estagiariosCreated: [],
+        estagiariosDetailedToCreate: [],
+        message:
+          "Nenhum dado legível foi recebido da planilha. Verifique as configurações de compartilhamento.",
+      };
+    }
+
+    let sheets: { [key: string]: string } = {};
+    if (typeof rawData === "string") {
+      sheets["Controle Geral"] = rawData;
+    } else {
+      sheets = rawData || {};
+    }
+
+    let estagiariosSheetContent = "";
+    let estagiariosSheetName = "";
+    const controleSheets: { name: string; content: string }[] = [];
+
+    // 1. Identify sheets
+    Object.entries(sheets).forEach(([name, content]) => {
+      const norm = normalizeText(name);
+      // Ignora abas de template/modelo (ex: MODELO GERAL) de onde não precisamos de nenhum dadd
+      if (norm.includes("modelo") || norm.includes("template")) {
+        return;
+      }
+      if (
+        /estag|membro|usuario|cadastro|user|integrante|funcionario/i.test(norm)
+      ) {
+        estagiariosSheetContent = content;
+        estagiariosSheetName = name;
+      } else if (norm.includes("controle")) {
+        // Apenas a aba de Controle
+        controleSheets.push({ name, content });
+      }
+    });
+
+    const estagiariosFromSheet: Estagiario[] = [];
+    const estagiariosCreatedTemp: string[] = [];
+
+    const getDelimiter = (csv: string) => {
+      const firstLine = csv.split(/\r?\n/)[0] || "";
+      if (firstLine.includes("\t")) return "\t";
+      if (firstLine.includes(";")) return ";";
+      return ",";
+    };
+
+    // 2. Process Estagiarios Sheet (Aba dos Estagiários)
+    if (estagiariosSheetContent) {
+      const eLines = estagiariosSheetContent
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (eLines.length > 1) {
+        const eDelim = getDelimiter(estagiariosSheetContent);
+        const eHeaders = eLines[0]
+          .split(eDelim)
+          .map((h) => h.trim().replace(/^["']|["']$/g, ""));
+
+        let nameColIdx = -1;
+        let matriculaColIdx = -1;
+        let roleColIdx = -1;
+        let goalColIdx = -1;
+
+        for (let i = 0; i < eHeaders.length; i++) {
+          const norm = normalizeText(eHeaders[i]);
+          if (
+            norm.includes("nome") ||
+            norm.includes("estagiario") ||
+            norm.includes("estagiário") ||
+            norm.includes("usuario") ||
+            norm.includes("pessoa") ||
+            norm.includes("membro")
+          ) {
+            nameColIdx = i;
+          } else if (
+            norm.includes("matricula") ||
+            norm.includes("matrícula") ||
+            norm.includes("numero") ||
+            norm.includes("número") ||
+            norm.includes("codigo") ||
+            norm.includes("código") ||
+            norm.includes("id")
+          ) {
+            matriculaColIdx = i;
+          } else if (
+            norm.includes("role") ||
+            norm.includes("cargo") ||
+            norm.includes("categoria") ||
+            norm.includes("tipo") ||
+            norm.includes("modalidade")
+          ) {
+            roleColIdx = i;
+          } else if (
+            norm.includes("meta") ||
+            norm.includes("daily") ||
+            norm.includes("diaria") ||
+            norm.includes("diária") ||
+            norm.includes("objetivo")
+          ) {
+            goalColIdx = i;
+          }
+        }
+
+        if (nameColIdx === -1) nameColIdx = 0;
+
+        for (let i = 1; i < eLines.length; i++) {
+          const cells = eLines[i]
+            .split(eDelim)
+            .map((c) => c.trim().replace(/^["']|["']$/g, ""));
+          if (cells.length <= nameColIdx) continue;
+
+          const rawName = cells[nameColIdx];
+          if (!rawName || rawName === "Nome") continue;
+
+          const rawMatricula =
+            matriculaColIdx !== -1 && matriculaColIdx < cells.length
+              ? cells[matriculaColIdx]
+              : "";
+          const rawRole =
+            roleColIdx !== -1 && roleColIdx < cells.length
+              ? cells[roleColIdx]
+              : "";
+          const rawGoal =
+            goalColIdx !== -1 && goalColIdx < cells.length
+              ? cells[goalColIdx]
+              : "";
+
+          let parsedRole = "graduacao";
+          const normRole = normalizeText(rawRole);
+          if (
+            normRole.includes("pos_grad") ||
+            normRole.includes("pós_grad") ||
+            normRole.includes("pos grad") ||
+            normRole.includes("pós grad") ||
+            normRole.includes("pos-grad") ||
+            normRole.includes("pós-grad")
+          ) {
+            parsedRole = "pos_graduacao";
+          } else if (
+            normRole.includes("grad") ||
+            normRole.includes("bacharel")
+          ) {
+            parsedRole = "graduacao";
+          }
+
+          let parsedGoal = parsedRole === "pos_graduacao" ? 30 : 25;
+          if (rawGoal) {
+            const gNum = parseInt(rawGoal.replace(/[^0-9]/g, ""), 10);
+            if (!isNaN(gNum) && gNum > 0) parsedGoal = gNum;
+          }
+
+          const computedId = rawName
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/\s+/g, "_")
+            .replace(/[^a-z0-9_]/g, "");
+          if (computedId) {
+            if (!estagiariosFromSheet.some((x) => x.id === computedId)) {
+              estagiariosFromSheet.push({
+                id: computedId,
+                name: rawName,
+                role: parsedRole,
+                dailyGoal: parsedGoal,
+                matricula: rawMatricula ? rawMatricula.trim() : "",
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Combine current with sheet estagiarios for matching IDs during parsing
+    const combinedCurrentAndSheetEstagiarios = [...currentEstagiarios];
+    estagiariosFromSheet.forEach((sheetEstag) => {
+      const idx = combinedCurrentAndSheetEstagiarios.findIndex(
+        (e) => e.id === sheetEstag.id,
+      );
+      if (idx !== -1) {
+        combinedCurrentAndSheetEstagiarios[idx] = {
+          ...combinedCurrentAndSheetEstagiarios[idx],
+          role: sheetEstag.role || combinedCurrentAndSheetEstagiarios[idx].role,
+          dailyGoal:
+            sheetEstag.dailyGoal ||
+            combinedCurrentAndSheetEstagiarios[idx].dailyGoal,
+          matricula:
+            sheetEstag.matricula ||
+            combinedCurrentAndSheetEstagiarios[idx].matricula,
+        };
+      } else {
+        combinedCurrentAndSheetEstagiarios.push(sheetEstag);
+      }
+    });
+
+    const parsedEntries: Omit<ProductivityEntry, "id">[] = [];
+
+    const findEstagiarioIdLocal = (name: string): string | null => {
+      const normName = normalizeText(name);
+      const found = combinedCurrentAndSheetEstagiarios.find(
+        (a) => normalizeText(a.name) === normName,
+      );
+      return found ? found.id : null;
+    };
+
+    // 3. Process Controle (Cases) Sheets
+    controleSheets.forEach(({ name: cName, content: cContent }) => {
+      if (!cContent) return;
+      const lines = cContent
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (lines.length <= 1) return;
+
+      const delimiter = getDelimiter(cContent);
+      const rows = lines.map((line) =>
+        line.split(delimiter).map((c) => c.trim().replace(/^["']|["']$/g, "")),
+      );
+
+      // 3.1 Identificar coluna de datas (aquela com maior quantidade de entradas de datas válidas)
+      let dateColIdx = -1;
+      let maxDateCount = 0;
+      const colCount = rows.reduce((max, r) => Math.max(max, r.length), 0);
+
+      for (let c = 0; c < colCount; c++) {
+        let dateCount = 0;
+        rows.forEach((row) => {
+          if (c < row.length && row[c] && parseDateToISO(row[c])) {
+            dateCount++;
+          }
+        });
+        if (dateCount > maxDateCount) {
+          maxDateCount = dateCount;
+          dateColIdx = c;
+        }
+      }
+
+      // Se não encontrou nenhuma coluna com datas válidas, pula esta aba
+      if (dateColIdx === -1) return;
+
+      // DETEMINAÇÃO DO FORMATO
+      // Tenta identificar se a tabela está no formato de lista flat (ex: Data, Estagiário, Quantidade)
+      if (rows.length > 0) {
+        const firstRows = [rows[0]];
+        if (rows[1]) firstRows.push(rows[1]); // Look at first 2 rows for headers
+
+        let estagiarioColIdx = -1;
+        let qtdColIdx = -1;
+        let headerRowIdxToSkip = -1;
+
+        for (let i = 0; i < firstRows.length; i++) {
+          const headerRow = firstRows[i].map((h) => normalizeText(h || ""));
+          const eIdx = headerRow.findIndex(
+            (h) =>
+              h.includes("nome") ||
+              h.includes("estagiario") ||
+              h.includes("autor"),
+          );
+          const qIdx = headerRow.findIndex(
+            (h) =>
+              h.includes("qtd") ||
+              h.includes("quantidade") ||
+              h.includes("processos") ||
+              h.includes("total"),
+          );
+          if (eIdx !== -1 && qIdx !== -1) {
+            estagiarioColIdx = eIdx;
+            qtdColIdx = qIdx;
+            headerRowIdxToSkip = i;
+            break;
+          }
+        }
+
+        if (estagiarioColIdx !== -1 && qtdColIdx !== -1 && dateColIdx !== -1) {
+          // Processamento para tabela no formato FLAT LIST
+          for (let r = headerRowIdxToSkip + 1; r < rows.length; r++) {
+            const row = rows[r];
+            const rawDate = row[dateColIdx] || "";
+            const isoDate = parseDateToISO(rawDate);
+            if (
+              !isoDate ||
+              isoDate < "2026-06-01" ||
+              isoDate > getCurrentDate()
+            )
+              continue;
+
+            // Fim de semana não pode contabilizar (Domingo=0, Sabado=6)
+            // const checkDate = new Date(`${isoDate}T12:00:00`);
+            // const dayOfWeek = checkDate.getDay();
+            // if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+
+            const estagiarioName = (row[estagiarioColIdx] || "").trim();
+            const qtdStr = row[qtdColIdx];
+            if (!estagiarioName || estagiarioName === "" || !qtdStr) continue;
+
+            let estagiarioId = findEstagiarioIdLocal(estagiarioName);
+            if (!estagiarioId) {
+              const generatedId = estagiarioName
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/\s+/g, "_")
+                .replace(/[^a-z0-9_]/g, "");
+              if (!generatedId || generatedId.length < 2) continue;
+              if (!estagiariosCreatedTemp.includes(estagiarioName))
+                estagiariosCreatedTemp.push(estagiarioName);
+              estagiarioId = generatedId;
+            }
+
+            const cleanedVal = qtdStr.replace(/\s/g, "").replace(",", ".");
+            const parsedVal = Math.round(parseFloat(cleanedVal));
+            if (!isNaN(parsedVal) && parsedVal > 0) {
+              parsedEntries.push({
+                estagiarioId,
+                date: isoDate,
+                count: parsedVal,
+              });
+            }
+          }
+          return; // Concluiu a leitura deta aba em formato flat
+        }
+      }
+
+      // 3.2 Identificar a linha dos nomes de estagiários (Formato Cruzado/Matriz)
+      let nameRowIdx = -1;
+      let maxNameScore = -1;
+
+      for (let r = 0; r < rows.length; r++) {
+        const row = rows[r];
+        // Se essa linha já é uma linha cheia de datas, não é a de nomes
+        if (row[dateColIdx] && parseDateToISO(row[dateColIdx])) {
+          continue;
+        }
+
+        let score = 0;
+        row.forEach((cell, cIdx) => {
+          if (cIdx === dateColIdx) return;
+          const trimmed = cell.trim();
+          if (!trimmed) return;
+
+          // Se bate exatamente com um estagiário cadastrado ou pré-carregado
+          const matchesExisting = combinedCurrentAndSheetEstagiarios.some(
+            (e) => normalizeText(e.name) === normalizeText(trimmed),
+          );
+
+          if (matchesExisting) {
+            score += 15; // Pontuação altíssima para estagiários pré-existentes
+          } else if (
+            /^[A-Za-zÀ-ÖØ-öø-ÿ\s\.\-]{3,25}$/.test(trimmed) &&
+            !/^\d+$/.test(trimmed) &&
+            !trimmed.includes("/") &&
+            !trimmed.includes("-")
+          ) {
+            const normTrimmed = normalizeText(trimmed);
+            const ignoreWords = [
+              "total",
+              "quantidade",
+              "data",
+              "obs",
+              "comentario",
+              "concluido",
+              "meta",
+              "soma",
+              "segunda",
+              "terca",
+              "quarta",
+              "quinta",
+              "sexta",
+              "sabado",
+              "domingo",
+              "porcent",
+              "percent",
+              "media",
+              "dias",
+              "mes",
+              "ano",
+              "semana",
+              "revisao",
+              "ajuste",
+            ];
+            if (!ignoreWords.some((w) => normTrimmed.includes(w))) {
+              score += 2;
+            }
+          }
+        });
+
+        if (score > maxNameScore) {
+          maxNameScore = score;
+          nameRowIdx = r;
+        }
+      }
+
+      // Se não encontrou uma linha de nomes satisfatória, usamos a linha 0 como padrão
+      if (nameRowIdx === -1) {
+        nameRowIdx = 0;
+      }
+
+      const nameRow = rows[nameRowIdx];
+
+      // 3.3 Mapear colunas que contêm cabeçalhos válidos de estagiários
+      const mappedCols: {
+        colIndex: number;
+        estagiarioId: string;
+        estagiarioName: string;
+      }[] = [];
+      nameRow.forEach((cell, cIdx) => {
+        if (cIdx === dateColIdx) return;
+        const estagiarioName = cell.trim();
+        if (!estagiarioName) return;
+
+        // Ignora palavras técnicas comuns para colunas (ex: "total", "observações", etc.)
+        const normName = normalizeText(estagiarioName);
+        const ignoreWords = [
+          "total",
+          "quantidade",
+          "data",
+          "obs",
+          "comentario",
+          "concluido",
+          "meta",
+          "soma",
+          "segunda",
+          "terca",
+          "quarta",
+          "quinta",
+          "sexta",
+          "sabado",
+          "domingo",
+          "porcent",
+          "percent",
+          "media",
+          "dias",
+          "mes",
+          "ano",
+          "semana",
+          "revisao",
+          "ajuste",
+          "dia",
+        ];
+
+        if (
+          ignoreWords.some((w) => normName.includes(w)) ||
+          normName.length < 3
+        ) {
+          return;
+        }
+
+        // Ignora colunas que são puramente números (ex: cabeçalhos extras como o total vertical da planilha "192")
+        if (
+          /^\d+$/.test(estagiarioName) ||
+          /^[\d\.\,\%]+$/.test(estagiarioName)
+        ) {
+          return;
+        }
+
+        let estagiarioId = findEstagiarioIdLocal(estagiarioName);
+        if (!estagiarioId) {
+          const generatedId = estagiarioName
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/\s+/g, "_")
+            .replace(/[^a-z0-9_]/g, "");
+          if (!generatedId) return; // Ignore columns that generate empty/invalid identifiers like blank spaces or notes
+          estagiariosCreatedTemp.push(estagiarioName);
+          estagiarioId = generatedId;
+        }
+        if (estagiarioId) {
+          mappedCols.push({ colIndex: cIdx, estagiarioId, estagiarioName });
+        }
+      });
+
+      // 3.4 Processar as linhas de dados (tendo data válida em `dateColIdx`)
+      rows.forEach((row) => {
+        if (dateColIdx >= row.length) return;
+        const rawDate = row[dateColIdx];
+        const isoDate = parseDateToISO(rawDate);
+        if (!isoDate || isoDate < "2026-06-01" || isoDate > getCurrentDate())
+          return;
+
+        // Fim de semana não pode contabilizar (Domingo=0, Sabado=6)
+        // const checkDate = new Date(`${isoDate}T12:00:00`);
+        // const dayOfWeek = checkDate.getDay();
+        // if (dayOfWeek === 0 || dayOfWeek === 6) { return; }
+
+        mappedCols.forEach(({ colIndex, estagiarioId }) => {
+          if (colIndex < row.length) {
+            const rawVal = row[colIndex];
+            if (rawVal) {
+              const cleanedVal = rawVal.replace(/\s/g, "").replace(",", ".");
+              const parsedVal = Math.round(parseFloat(cleanedVal));
+              if (!isNaN(parsedVal) && parsedVal >= 0) {
+                parsedEntries.push({
+                  estagiarioId,
+                  date: isoDate,
+                  count: parsedVal,
+                });
+              }
+            } else {
+              // Se a célula está vazia, nós assumimos produtividade zero
+              parsedEntries.push({
+                estagiarioId,
+                date: isoDate,
+                count: 0,
+              });
+            }
+          }
+        });
+      });
+    });
+
+    // ELIMINATE DUPLICATES AND REDUNDANCIES:
+    const consolidatedMap: { [key: string]: Omit<ProductivityEntry, "id"> } =
+      {};
+    parsedEntries.forEach((entry) => {
+      const key = `${entry.estagiarioId}_${entry.date}`;
+      if (consolidatedMap[key]) {
+        consolidatedMap[key].count += entry.count;
+      } else {
+        consolidatedMap[key] = { ...entry };
+      }
+    });
+
+    const consolidatedEntries = Object.values(consolidatedMap);
+
+    // Ensure estagiariosCreatedTemp has detailed representations in estagiariosFromSheet
+    estagiariosCreatedTemp.forEach((name) => {
+      const code = name
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, "_")
+        .replace(/[^a-z0-9_]/g, "");
+      if (
+        code &&
+        !estagiariosFromSheet.some((e) => e.id === code) &&
+        !currentEstagiarios.some((e) => e.id === code)
+      ) {
+        estagiariosFromSheet.push({
+          id: code,
+          name: name,
+          role: "graduacao",
+          dailyGoal: 25,
+          matricula: "",
+        });
+      }
+    });
+
+    // Extract names for backward compatibility list display
+    const uniqueEstagiariosCreated = Array.from(
+      new Set(estagiariosFromSheet.map((e) => e.name)),
+    );
+
+    let msg = "";
+    if (estagiariosSheetContent && controleSheets.length > 0) {
+      const namesList = controleSheets.map((s) => `"${s.name}"`).join(", ");
+      msg = `Sincronização concluída! Foram sincronizados ${consolidatedEntries.length} casos de produtividade ao todo a partir de ${controleSheets.length} aba(s) (${namesList}) e localizados ${estagiariosFromSheet.length} perfis de estagiários na aba "${estagiariosSheetName}".`;
+    } else if (controleSheets.length > 0) {
+      const namesList = controleSheets.map((s) => `"${s.name}"`).join(", ");
+      msg = `Sincronização concluída! Foram sincronizados ${consolidatedEntries.length} casos de produtividade ao todo a partir de ${controleSheets.length} aba(s) (${namesList}).`;
+    } else {
+      msg = `Sincronização concluída! Importados ${estagiariosFromSheet.length} perfis de estagiários.`;
+    }
+
+    return {
+      success: true,
+      entries: consolidatedEntries,
+      estagiariosCreated: uniqueEstagiariosCreated,
+      estagiariosDetailedToCreate: estagiariosFromSheet,
+      message: msg,
+    };
+  };
+
+  // Trigger Sheet Sync
+  const triggerSheetsSync = async (
+    urlStr: string,
+    activeEstagiarios: Estagiario[],
+    showFeedback: boolean = true,
+  ) => {
+    if (!urlStr) {
+      if (showFeedback)
+        alert("Por favor, insira o link da Planilha do Google.");
+      return;
+    }
+
+    const isDocUrl = urlStr.includes("/d/");
+    if (!isDocUrl) {
+      if (showFeedback)
+        alert(
+          "URL do Google Planilhas inválida. Certifique-se de copiar o link do seu navegador.",
+        );
+      return;
+    }
+
+    if (showFeedback) {
+      setSyncingSheets(true);
+      setSheetsMessage("Iniciando conexão de sincronização...");
+    }
+    setSheetSyncError("");
+
+    try {
+      const activeToken = (await getAccessToken()) || googleToken;
+      // Timeout controller for 60 seconds
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      // Call the server-side proxy endpoint to fetch Google Sheet bypassing CORS
+      const response = await fetch("/api/sync-sheet", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(activeToken ? { Authorization: `Bearer ${activeToken}` } : {}),
+        },
+        body: JSON.stringify({ url: urlStr, token: activeToken }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        if (errorData.action === "LOGOUT") {
+          handleGoogleLogout();
+          throw new Error("Sua sessão expirou. Fazendo logout automático para reautenticação.");
+        }
+        
+        let errorMsg = errorData.error || "Não foi possível acessar a planilha.";
+        
+        if (response.status === 401 || response.status === 403) {
+          setHasSpreadsheetAccess(false);
+        } else if (response.status === 429) {
+          setHasSpreadsheetAccess(true);
+        } else {
+          setHasSpreadsheetAccess(false);
+        }
+        
+        const error = new Error(errorMsg);
+        (error as any).status = response.status;
+        throw error;
+      }
+
+      const resData = await response.json();
+      const parseResult = parseSheetData(
+        resData.sheets || resData.csvText,
+        activeEstagiarios,
+      );
+
+      if (!parseResult.success) {
+        setHasSpreadsheetAccess(false);
+        if (showFeedback) alert(parseResult.message);
+        setSheetSyncError(parseResult.message);
+        return;
+      }
+
+      setHasSpreadsheetAccess(true);
+      setPreviewEntries(parseResult.entries);
+      setPreviewEstagiariosToCreate(parseResult.estagiariosCreated);
+      setPreviewEstagiariosDetailed(
+        parseResult.estagiariosDetailedToCreate || [],
+      );
+      setSheetsMessage(parseResult.message);
+      setSheetSyncError("");
+
+      // Salva automaticamente no Firestore em qualquer sincronização
+      await saveSyncedDataToFirestore(
+        parseResult.entries,
+        parseResult.estagiariosCreated,
+        urlStr,
+        !showFeedback,
+        parseResult.estagiariosDetailedToCreate || [],
+      );
+
+      if (showFeedback) {
+        setIsSheetsModalOpen(true);
+      }
+    } catch (err: any) {
+      console.error(err);
+      const isQuotaError = err.status === 429 || (err.message && err.message.toLowerCase().includes("quota"));
+      if (err.status === 401 || err.status === 403) {
+        setHasSpreadsheetAccess(false);
+      } else if (!isQuotaError && !hasSpreadsheetAccess && hasSpreadsheetAccess !== null) {
+        // Leave it false if it was already false, but if it's 429, don't force it to false
+        setHasSpreadsheetAccess(false);
+      } else if (!isQuotaError && hasSpreadsheetAccess === null) {
+        setHasSpreadsheetAccess(false);
+      }
+      
+      const errMsg =
+        err.message ||
+        "Verifique as configurações de compartilhamento da planilha.";
+      setSheetSyncError(errMsg);
+      if (showFeedback) {
+        alert(`Falha na sincronização em tempo real: ${errMsg}`);
+      }
+    } finally {
+      if (showFeedback) setSyncingSheets(false);
+    }
+  };
+
+  // Convert pasted text (Ctrl+V) instantly
+  const handleImportPastedData = async () => {
+    if (!pasteDataText.trim()) {
+      showToast(
+        "Por favor, copie dados da sua planilha Excel e cole na caixa de texto.",
+        "error",
+      );
+      return;
+    }
+
+    const parseResult = parseSheetData(pasteDataText, estagiarios);
+    if (!parseResult.success) {
+      showToast(parseResult.message, "error");
+      return;
+    }
+
+    setPreviewEntries(parseResult.entries);
+    setPreviewEstagiariosToCreate(parseResult.estagiariosCreated);
+    setPreviewEstagiariosDetailed(
+      parseResult.estagiariosDetailedToCreate || [],
+    );
+    setSheetsMessage(
+      parseResult.message + " (Copiado da área de transferência)",
+    );
+
+    try {
+      // Salva automaticamente no Firestore também para colagem direta do Excel
+      await saveSyncedDataToFirestore(
+        parseResult.entries,
+        parseResult.estagiariosCreated,
+        spreadsheetUrl,
+        false,
+        parseResult.estagiariosDetailedToCreate || [],
+      );
+      showToast(
+        "Dados salvos e sincronizados no banco com sucesso!",
+        "success",
+      );
+      setPasteDataText(""); // clear input after success
+      setIsSheetsModalOpen(false); // close modal
+    } catch (e: any) {
+      showToast("Erro ao salvar dados colados: " + e.message, "error");
+    }
+  };
+
+  // Salva apenas as configurações de vínculo com a planilha no Firebase e já realiza a sincronização imediata salvando os dados
+  const handleSaveSheetSettings = async () => {
+    if (!spreadsheetUrl.trim()) {
+      alert("Por favor, insira o link da Planilha do Google antes de salvar.");
+      return;
+    }
+
+    const isDocUrl = spreadsheetUrl.includes("/d/");
+    if (!isDocUrl) {
+      alert(
+        "URL do Google Planilhas inválida. Certifique-se de copiar o link completo do seu navegador.",
+      );
+      return;
+    }
+
+    setIsSaving(true);
+    setSyncingSheets(true);
+    setSheetsMessage("Configurando vínculo e importando dados da planilha...");
+    try {
+      const nowIso = new Date().toISOString();
+      await setDoc(
+        doc(db, "settings", "googleSheet"),
+        {
+          url: spreadsheetUrl.trim(),
+          autoSync: autoSyncEnabled,
+          lastSync: nowIso,
+        },
+        { merge: true },
+      );
+      setLastSyncTime(nowIso);
+
+      // Executa sincronização imediata
+      const activeToken = (await getAccessToken()) || googleToken;
+      // Timeout controller for 60 seconds
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      const response = await fetch("/api/sync-sheet", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(activeToken ? { Authorization: `Bearer ${activeToken}` } : {}),
+        },
+        body: JSON.stringify({
+          url: spreadsheetUrl.trim(),
+          token: activeToken,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        if (errorData.action === "LOGOUT") {
+          handleGoogleLogout();
+          throw new Error("Sua sessão expirou. Fazendo logout automático para reautenticação.");
+        }
+        
+        const error = new Error(
+          errorData.error ||
+            "Não foi possível sincronizar os dados da planilha. Verifique as permissões de compartilhamento.",
+        );
+        (error as any).status = response.status;
+        throw error;
+      }
+
+      const resData = await response.json();
+      const parseResult = parseSheetData(
+        resData.sheets || resData.csvText,
+        estagiarios,
+      );
+
+      if (!parseResult.success) {
+        throw new Error(parseResult.message);
+      }
+
+      setPreviewEntries(parseResult.entries);
+      setPreviewEstagiariosToCreate(parseResult.estagiariosCreated);
+      setPreviewEstagiariosDetailed(
+        parseResult.estagiariosDetailedToCreate || [],
+      );
+      setSheetsMessage(parseResult.message);
+      setSheetSyncError("");
+
+      // Salva os dados carregados no Firestore instantaneamente
+      await saveSyncedDataToFirestore(
+        parseResult.entries,
+        parseResult.estagiariosCreated,
+        spreadsheetUrl.trim(),
+        true, // isStartupSilent = true
+        parseResult.estagiariosDetailedToCreate || [],
+      );
+
+      alert(
+        `A planilha foi vinculada e sincronizada com sucesso! Foram salvos ${parseResult.entries.length} lançamentos de produtividade no banco de dados. ` +
+          (autoSyncEnabled
+            ? "A Sincronização em Tempo Real está ATIVA para carregar dados automaticamente ao abrir o site."
+            : ""),
+      );
+
+      // Limpa os dados de preview
+      setPreviewEntries([]);
+      setPreviewEstagiariosToCreate([]);
+      setPreviewEstagiariosDetailed([]);
+    } catch (err: any) {
+      console.error(err);
+      alert(
+        "Erro ao gravar vínculo e sincronizar dados: " + (err.message || err),
+      );
+      setSheetSyncError(err.message || "");
+    } finally {
+      setIsSaving(false);
+      setSyncingSheets(false);
+    }
+  };
+
+  // Desvincula a planilha atual do sistema
+  const handleUnlinkSheet = async () => {
+    if (
+      !window.confirm(
+        "Tem certeza que deseja remover o vínculo com esta planilha? O link será limpo do sistema, mas os dados de processos já salvos serão preservados.",
+      )
+    ) {
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await setDoc(
+        doc(db, "settings", "googleSheet"),
+        {
+          url: "",
+          autoSync: false,
+          lastSync: null,
+        },
+        { merge: true },
+      );
+
+      setSpreadsheetUrl("");
+      setAutoSyncEnabled(false);
+      setLastSyncTime("");
+      alert("Vínculo removido com sucesso!");
+    } catch (err: any) {
+      console.error(err);
+      alert("Erro ao desvincular planilha: " + (err.message || err));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Persists the parsed data to Supabase using optimized bulk upserts
+  const saveSyncedDataToFirestore = async (
+    entriesToSave: Omit<ProductivityEntry, "id">[],
+    estagiariosToCreate: string[],
+    sheetUrl: string = spreadsheetUrl,
+    isStartupSilent: boolean = false,
+    estagiariosDetailedToCreate: Estagiario[] = previewEstagiariosDetailed,
+  ) => {
+    setIsSaving(true);
+    try {
+      // 1. Upsert estagiários (usar lista detalhada se disponível, fallback para lista de nomes)
+      let estagiariosToUpsert: Estagiario[] = [];
+
+      if (estagiariosDetailedToCreate && estagiariosDetailedToCreate.length > 0) {
+        estagiariosToUpsert = estagiariosDetailedToCreate.filter((e) => e && e.id);
+      } else {
+        for (const name of estagiariosToCreate) {
+          const computedId = name
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/\s+/g, "_")
+            .replace(/[^a-z0-9_]/g, "");
+          if (!computedId) continue;
+          if (!estagiarios.some((a) => a.id === computedId)) {
+            estagiariosToUpsert.push({
+              id: computedId,
+              name,
+              role: "graduacao",
+              dailyGoal: 25,
+              matricula: "",
+            });
+          }
+        }
+      }
+
+      if (estagiariosToUpsert.length > 0) {
+        await batchUpsertEstagiarios(estagiariosToUpsert);
+        // Atualiza estado local
+        setEstagiarios((prev) => {
+          const next = [...prev];
+          estagiariosToUpsert.forEach((e) => {
+            const idx = next.findIndex((x) => x.id === e.id);
+            if (idx !== -1) {
+              next[idx] = { ...next[idx], ...e };
+            } else {
+              next.push(e);
+            }
+          });
+          return next.filter((e) => e && e.id).sort((a, b) => a.name.localeCompare(b.name));
+        });
+      }
+
+      // 2. Upsert entradas de produtividade em massa
+      const validEntries = entriesToSave.filter((e) => e && e.estagiarioId && e.date);
+      if (validEntries.length > 0) {
+        await batchUpsertEntries(validEntries);
+      }
+
+      // 3. Recarregar entradas do banco para garantir consistência
+      const entriesSnap = await getDocs(collection(db, "productivityEntries"));
+      const entriesList: ProductivityEntry[] = [];
+      const today = getCurrentDate();
+      entriesSnap.forEach((docSnap) => {
+        const data = docSnap.data() as ProductivityEntry;
+        if (data.date <= today) {
+          entriesList.push({ id: docSnap.id, ...data });
+        }
+      });
+      setEntries(entriesList);
+
+      // 4. Salvar configurações da planilha
+      const nowIso = new Date().toISOString();
+      await setDoc(
+        doc(db, "settings", "googleSheet"),
+        {
+          url: sheetUrl,
+          autoSync: autoSyncEnabled,
+          lastSync: nowIso,
+        },
+        { merge: true },
+      );
+      setLastSyncTime(nowIso);
+
+      // Auto-set the active view to the newly imported/synced month
+      if (entriesToSave.length > 0) {
+        const monthCounts: Record<string, number> = {};
+        entriesToSave.forEach((e) => {
+          if (e.date && e.date.length >= 7) {
+            const m = e.date.substring(0, 7);
+            monthCounts[m] = (monthCounts[m] || 0) + 1;
+          }
+        });
+        let bestMonth = selectedMonth;
+        let maxCount = 0;
+        Object.entries(monthCounts).forEach(([m, count]) => {
+          if (count > maxCount) {
+            maxCount = count;
+            bestMonth = m;
+          }
+        });
+        setSelectedMonth(bestMonth);
+      }
+
+      if (!isStartupSilent) {
+        alert(
+          `Carregamento concluído! Sincronizados ${entriesToSave.length} lançamentos de produtividade. ${estagiariosToUpsert.length > 0 ? `${estagiariosToUpsert.length} estagiários sincronizados` : ""}.`,
+        );
+        setIsSheetsModalOpen(false);
+        setPasteDataText("");
+        setPreviewEntries([]);
+        setPreviewEstagiariosToCreate([]);
+        setPreviewEstagiariosDetailed([]);
+      }
+    } catch (err) {
+      console.error("Error writing synced data", err);
+      if (!isStartupSilent)
+        alert("Erro ao gravar novos dados sincronizados no Supabase.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+
+  useEffect(() => {
+    fetchData();
+
+    // Supabase Realtime — atualiza o estado local automaticamente
+    const unsubEstag = subscribeToEstagiarios(
+      (updated) => {
+        setEstagiarios((prev) => {
+          const idx = prev.findIndex((e) => e.id === updated.id);
+          if (idx !== -1) {
+            const next = [...prev];
+            next[idx] = updated;
+            return next.sort((a, b) => a.name.localeCompare(b.name));
+          }
+          return [...prev, updated].sort((a, b) => a.name.localeCompare(b.name));
+        });
+      },
+      (deletedId) => {
+        setEstagiarios((prev) => prev.filter((e) => e.id !== deletedId));
+      }
+    );
+
+    const unsubEntries = subscribeToEntries(
+      (updated) => {
+        setEntries((prev) => {
+          const idx = prev.findIndex((e) => e.id === updated.id);
+          if (idx !== -1) {
+            const next = [...prev];
+            next[idx] = updated;
+            return next;
+          }
+          return [...prev, updated];
+        });
+      },
+      (deletedId) => {
+        setEntries((prev) => prev.filter((e) => e.id !== deletedId));
+      }
+    );
+
+    return () => {
+      unsubEstag();
+      unsubEntries();
+    };
+  }, []);
+
+  // Sincronização automática dinâmica ao iniciar o aplicativo e contínua:
+  useEffect(() => {
+    // Sincronização inicial (agora ignora autoSyncEnabled para sempre verificar acesso no boot)
+    if (
+      spreadsheetUrl &&
+      estagiarios.length > 0 &&
+      !isAuthLoading &&
+      !hasAutoSyncedOnStartup
+    ) {
+      setHasAutoSyncedOnStartup(true);
+      triggerSheetsSync(spreadsheetUrl, estagiarios, false);
+    }
+  }, [
+    spreadsheetUrl,
+    estagiarios,
+    isAuthLoading,
+    hasAutoSyncedOnStartup,
+  ]);
+
+  // Polling para "tempo real" a cada 10 segundos
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval>;
+
+    if (
+      spreadsheetUrl &&
+      autoSyncEnabled &&
+      estagiarios.length > 0 &&
+      hasAutoSyncedOnStartup &&
+      !syncingSheets
+    ) {
+      interval = setInterval(() => {
+        triggerSheetsSync(spreadsheetUrl, estagiarios, false);
+      }, 10000);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [
+    spreadsheetUrl,
+    autoSyncEnabled,
+    estagiarios,
+    hasAutoSyncedOnStartup,
+    syncingSheets,
+  ]);
+
+  // Real-time notifications for productivity updates
+  useEffect(() => {
+    if (!estagiarios || estagiarios.length === 0 || entries.length === 0)
+      return;
+
+    const todayStr = new Date().toLocaleDateString("en-CA");
+    const currentTodayCounts = estagiarios.reduce(
+      (acc, estagiario) => {
+        const todayEntry = entries.find(
+          (e) => e.estagiarioId === estagiario.id && e.date === todayStr,
+        );
+        acc[estagiario.id] = todayEntry ? todayEntry.count : 0;
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
+
+    if (Object.keys(previousTodayCounts.current).length > 0) {
+      for (const est of estagiarios) {
+        const prev = previousTodayCounts.current[est.id] || 0;
+        const curr = currentTodayCounts[est.id] || 0;
+        const diff = curr - prev;
+
+        if (diff > 0) {
+          const newNotif = {
+            id: Date.now() + "_" + est.id + "_" + Math.random(),
+            estagiarioName: est.name,
+            diff,
+            count: curr,
+          };
+          setNotifications((prevArr) => [...prevArr, newNotif]);
+
+          setTimeout(() => {
+            setNotifications((prevArr) =>
+              prevArr.filter((n) => n.id !== newNotif.id),
+            );
+          }, 6000);
+        }
+      }
+    }
+
+    previousTodayCounts.current = currentTodayCounts;
+  }, [entries, estagiarios]);
+
+  // Current formatted time & date
+  const formattedTime = useMemo(() => {
+    return currentTime.toLocaleTimeString("pt-BR", { hour12: false });
+  }, [currentTime]);
+
+  const formattedDate = useMemo(() => {
+    return currentTime.toLocaleDateString("pt-BR", {
+      day: "2-digit",
+      month: "long",
+      year: "numeric",
+    });
+  }, [currentTime]);
+
+  // Handle entry saving (create or update)
+  const handleSaveEntry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formEstagiarioId || !formDate || formCount < 0) return;
+
+    setIsSaving(true);
+    try {
+      const entryId = formEditingId || `${formEstagiarioId}_${formDate}`;
+      const payload: ProductivityEntry = {
+        id: entryId,
+        estagiarioId: formEstagiarioId,
+        date: formDate,
+        count: Number(formCount),
+      };
+
+      await setDoc(doc(db, "productivityEntries", entryId), payload);
+
+      // Update local state smoothly
+      setEntries((prev) => {
+        const filtered = prev.filter((item) => item.id !== entryId);
+        return [...filtered, payload];
+      });
+
+      // Reset form & close modal
+      setFormEditingId(null);
+      setFormCount(0);
+      setIsLaunchModalOpen(false);
+    } catch (err) {
+      console.error("Error saving entry:", err);
+      alert("Erro ao salvar o registro de produtividade.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Handle deleting entry
+  const handleDeleteEntry = async (entryId: string) => {
+    if (
+      !window.confirm(
+        "Deseja realmente excluir este registro de produtividade sem retorno?",
+      )
+    )
+      return;
+
+    setIsSaving(true);
+    try {
+      await deleteDoc(doc(db, "productivityEntries", entryId));
+      setEntries((prev) => prev.filter((item) => item.id !== entryId));
+    } catch (err) {
+      console.error("Error deleting entry:", err);
+      alert("Erro ao excluir o registro.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Add new Estagiario
+  const handleAddEstagiario = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newEstagiarioName.trim()) return;
+
+    const computedId = (
+      newEstagiarioId.trim().toLowerCase().replace(/\s+/g, "_") ||
+      newEstagiarioName
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, "_")
+    ).replace(/[^a-z0-9_]/g, "");
+
+    if (!computedId) {
+      alert(
+        "Não foi possível gerar um identificador ID válido a partir das informações inseridas.",
+      );
+      return;
+    }
+
+    if (estagiarios.some((a) => a.id === computedId)) {
+      alert("Um estagiario com este ID ou nome simplificado já existe!");
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const newEstagiarioObj: Estagiario = {
+        id: computedId,
+        name: newEstagiarioName.trim(),
+        role: newEstagiarioRole,
+        dailyGoal: Number(newEstagiarioDailyGoal),
+        matricula: newEstagiarioMatricula.trim(),
+      };
+
+      await setDoc(doc(db, "estagiarios", computedId), newEstagiarioObj);
+      setEstagiarios((prev) =>
+        [...prev, newEstagiarioObj].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
+      );
+
+      setNewEstagiarioName("");
+      setNewEstagiarioId("");
+      setNewEstagiarioRole("graduacao");
+      setNewEstagiarioDailyGoal(25);
+      setNewEstagiarioMatricula("");
+      setIsAddEstagiarioOpen(false);
+    } catch (err) {
+      console.error("Error adding estagiario:", err);
+      alert("Erro ao criar estagiario de pós/graduação.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Update existing Estagiario cadastre (name, type, goal)
+  const handleUpdateEstagiarioCadastre = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedEstagiarioDetail || !editEstagiarioName.trim()) return;
+
+    setIsSaving(true);
+    try {
+      const updatedEstagiarioObj: Estagiario = {
+        id: selectedEstagiarioDetail,
+        name: editEstagiarioName.trim(),
+        role: editEstagiarioRole,
+        dailyGoal: Number(editEstagiarioDailyGoal),
+        matricula: editEstagiarioMatricula.trim(),
+      };
+
+      await setDoc(
+        doc(db, "estagiarios", selectedEstagiarioDetail),
+        updatedEstagiarioObj,
+      );
+      setEstagiarios((prev) =>
+        prev.map((a) =>
+          a.id === selectedEstagiarioDetail ? updatedEstagiarioObj : a,
+        ),
+      );
+      setIsEditingCadastre(false);
+    } catch (err) {
+      console.error("Error updating estagiario:", err);
+      alert("Erro ao atualizar o cadastro.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // List of unique months that have at least one productivity entry
+  const availableMonths = useMemo(() => {
+    const monthsSet = new Set<string>();
+    entries.forEach((e) => {
+      if (e.date && e.date.length >= 7) {
+        monthsSet.add(e.date.substring(0, 7));
+      }
+    });
+    // Ensure the current active selection is always in the options
+    if (selectedMonth) {
+      monthsSet.add(selectedMonth);
+    } else {
+      monthsSet.add("2026-06");
+    }
+    return Array.from(monthsSet).sort();
+  }, [entries, selectedMonth]);
+
+  // Helper date lists for Matrix
+  const daysInMonthList = useMemo(() => {
+    if (!selectedMonth) return [];
+    const [year, month] = selectedMonth.split("-").map(Number);
+    const date = new Date(year, month, 0);
+    const daysCount = date.getDate();
+
+    const days = [];
+    for (let i = 1; i <= daysCount; i++) {
+      const dayStr = String(i).padStart(2, "0");
+      const monthStr = String(month).padStart(2, "0");
+      days.push(`${year}-${monthStr}-${dayStr}`);
+    }
+    return days;
+  }, [selectedMonth]);
+
+  // Map entries for speed lookup
+  const entriesMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    entries.forEach((entry) => {
+      map[`${entry.estagiarioId}_${entry.date}`] = entry.count;
+    });
+    return map;
+  }, [entries]);
+
+  const maxDailyCountInMonth = useMemo(() => {
+    let max = 0;
+    Object.keys(entriesMap).forEach((key) => {
+      if (key.includes(selectedMonth)) {
+        if (entriesMap[key] > max) max = entriesMap[key];
+      }
+    });
+    return max;
+  }, [entriesMap, selectedMonth]);
+
+  const getHeatmapColor = (count: number | undefined, maxCount: number) => {
+    if (!count) return "bg-slate-900/[0.04] text-slate-400 font-normal";
+    if (maxCount === 0)
+      return "bg-indigo-100 text-indigo-900 shadow-inner border border-indigo-200";
+
+    const intensity = count / maxCount;
+    if (intensity >= 0.8)
+      return "bg-indigo-600 text-white font-bold border border-indigo-700 shadow-inner";
+    if (intensity >= 0.6)
+      return "bg-indigo-500 text-white font-bold border border-indigo-600 shadow-inner";
+    if (intensity >= 0.4)
+      return "bg-indigo-400 text-white font-bold border border-indigo-500 shadow-inner";
+    if (intensity >= 0.2)
+      return "bg-indigo-300 text-indigo-900 font-bold border border-indigo-400 shadow-inner";
+    return "bg-indigo-100 text-indigo-800 font-bold border border-indigo-200 shadow-inner";
+  };
+
+  // Compute calculated values per Estagiario
+  const parsedEstagiariosData = useMemo(() => {
+    const todayStr = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD local time
+
+    return estagiarios.map((estagiario) => {
+      // Find entries for this estagiario in the selected month
+      const filteredEntries = entries.filter(
+        (e) =>
+          e.estagiarioId === estagiario.id && e.date.startsWith(selectedMonth),
+      );
+
+      const totalAnalyzed = filteredEntries.reduce(
+        (sum, item) => sum + item.count,
+        0,
+      );
+      const daysWorked = filteredEntries.filter(
+        (item) => item.count > 0,
+      ).length;
+      const averagePerDay =
+        daysWorked > 0 ? Number((totalAnalyzed / daysWorked).toFixed(1)) : 0;
+
+      const todayEntry = entries.find(
+        (e) => e.estagiarioId === estagiario.id && e.date === todayStr,
+      );
+      const todayAnalyzed = todayEntry ? todayEntry.count : 0;
+
+      const role =
+        estagiario.role === "pos_graduacao" ? "pos_graduacao" : "graduacao";
+      const dailyGoal =
+        estagiario.dailyGoal ?? (role === "pos_graduacao" ? 30 : 25);
+      const daysMeetingGoal = filteredEntries.filter(
+        (item) => item.count >= dailyGoal,
+      ).length;
+      const goalProgressRatio =
+        dailyGoal > 0
+          ? Number(((averagePerDay / dailyGoal) * 100).toFixed(1))
+          : 0;
+
+      // Determine status badge: can be based on goalProgressRatio!
+      // If goalProgress >= 100% -> ALTO
+      // If goalProgress >= 70% -> NORMAL
+      // Else -> ATENÇÃO
+      let status: "ALTO" | "NORMAL" | "ATENÇÃO" = "NORMAL";
+      const ratio = dailyGoal > 0 ? (averagePerDay / dailyGoal) * 100 : 0;
+      if (ratio >= 100 && totalAnalyzed > 0) status = "ALTO";
+      else if (ratio < 70 || totalAnalyzed === 0) status = "ATENÇÃO";
+
+      return {
+        ...estagiario,
+        role,
+        dailyGoal,
+        daysMeetingGoal,
+        goalProgressRatio:
+          dailyGoal > 0
+            ? Number(((averagePerDay / dailyGoal) * 100).toFixed(1))
+            : 0,
+        totalAnalyzed,
+        todayAnalyzed,
+        daysWorked,
+        averagePerDay,
+        status,
+        entriesList: filteredEntries,
+      };
+    });
+  }, [estagiarios, entries, selectedMonth]);
+
+  // Global aggregate metrics
+  const globalMetrics = useMemo(() => {
+    const filteredEntries = entries.filter((e) =>
+      e.date.startsWith(selectedMonth),
+    );
+    const totalAnalyzed = filteredEntries.reduce(
+      (sum, item) => sum + item.count,
+      0,
+    );
+
+    // Previous Month Comparison
+    let [y, m] = selectedMonth.split("-");
+    let prevM = parseInt(m, 10) - 1;
+    let prevY = parseInt(y, 10);
+    if (prevM === 0) {
+      prevM = 12;
+      prevY -= 1;
+    }
+    const prevMonthStr = `${prevY}-${String(prevM).padStart(2, "0")}`;
+    const previousMonthEntries = entries.filter((e) =>
+      e.date.startsWith(prevMonthStr),
+    );
+    const previousMonthTotalAnalyzed = previousMonthEntries.reduce(
+      (sum, item) => sum + item.count,
+      0,
+    );
+
+    let monthGrowth = 0;
+    if (previousMonthTotalAnalyzed > 0) {
+      monthGrowth =
+        ((totalAnalyzed - previousMonthTotalAnalyzed) /
+          previousMonthTotalAnalyzed) *
+        100;
+    } else if (totalAnalyzed > 0) {
+      monthGrowth = 100;
+    }
+
+    // Count active estagiarios (who analyzed > 0 cases this month)
+    const activeEstagiarios = parsedEstagiariosData.filter(
+      (a) => a.totalAnalyzed > 0,
+    );
+    const activeCount = activeEstagiarios.length;
+
+    // Total registered estagiarios
+    const totalEstagiarios = estagiarios.length;
+
+    // Average processes analyzed per active estagiario
+    const averagePerEstagiario =
+      activeCount > 0 ? Number((totalAnalyzed / activeCount).toFixed(1)) : 0;
+
+    // Team Daily Goal (Sum of all active interns' daily goals)
+    const teamDailyGoal = activeEstagiarios.reduce(
+      (sum, item) => sum + (item.dailyGoal || 0),
+      0,
+    );
+
+    return {
+      totalAnalyzed,
+      previousMonthTotalAnalyzed,
+      monthGrowth,
+      activeCount,
+      totalEstagiarios,
+      averagePerEstagiario,
+      teamDailyGoal,
+    };
+  }, [entries, selectedMonth, parsedEstagiariosData, estagiarios]);
+
+  // Listed Estagiarios, filtered by query
+  const filteredEstagiariosData = useMemo(() => {
+    let result = parsedEstagiariosData;
+    if (filterQuery.trim()) {
+      const queryLower = filterQuery.toLowerCase();
+      result = result.filter((item) =>
+        item.name.toLowerCase().includes(queryLower),
+      );
+    }
+
+    // Sort
+    result = [...result].sort((a, b) => {
+      const dir = teamSortConfig.dir === "asc" ? 1 : -1;
+      let valA: any = a[teamSortConfig.key as keyof typeof a];
+      let valB: any = b[teamSortConfig.key as keyof typeof b];
+
+      if (valA === undefined) valA = 0;
+      if (valB === undefined) valB = 0;
+
+      if (teamSortConfig.key === "status") {
+        const score = {
+          "Bateu a Meta": 3,
+          Atenção: 2,
+          "Abaixo da Meta": 1,
+          Inativo: 0,
+        };
+        valA = score[a.status as keyof typeof score] ?? 0;
+        valB = score[b.status as keyof typeof score] ?? 0;
+      }
+
+      if (typeof valA === "string" && typeof valB === "string") {
+        return valA.localeCompare(valB) * dir;
+      }
+      if (valA < valB) return -1 * dir;
+      if (valA > valB) return 1 * dir;
+      return 0;
+    });
+
+    return result;
+  }, [parsedEstagiariosData, filterQuery, teamSortConfig]);
+
+  const handleTeamSort = (key: string) => {
+    setTeamSortConfig((prev) => {
+      if (prev.key === key) {
+        return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
+      }
+      return { key, dir: key === "name" ? "asc" : "desc" };
+    });
+  };
+
+  // Statistics for progress bars (resources split projection based on totals)
+  const categorySplit = useMemo(() => {
+    const total = globalMetrics.totalAnalyzed || 1;
+    return [
+      { name: "RECURSOS CÍVEIS", pct: 68, color: "bg-blue-600" },
+      { name: "AGRAVOS", pct: 40, color: "bg-amber-500" },
+      { name: "HABEAS CORPUS", pct: 92, color: "bg-emerald-500" },
+    ];
+  }, [globalMetrics.totalAnalyzed]);
+
+  // Daily Trends for the active month (Recharts)
+  const dailyTrendsData = useMemo(() => {
+    const map = new Map<string, number>();
+
+    // Find how many days in selected month
+    const [y, m] = selectedMonth.split("-");
+    const year = parseInt(y, 10);
+    const month = parseInt(m, 10);
+    const daysInMonth = new Date(year, month, 0).getDate();
+
+    for (let i = 1; i <= daysInMonth; i++) {
+      const dStr = `${year}-${String(month).padStart(2, "0")}-${String(i).padStart(2, "0")}`;
+      map.set(dStr, 0);
+    }
+
+    const filteredEntries = entries.filter((e) =>
+      e.date.startsWith(selectedMonth),
+    );
+    for (const e of filteredEntries) {
+      if (map.has(e.date)) {
+        map.set(e.date, (map.get(e.date) || 0) + e.count);
+      }
+    }
+
+    return Array.from(map.entries()).map(([date, count]) => {
+      const day = parseInt(date.split("-")[2], 10);
+      return {
+        dia: String(day).padStart(2, "0"),
+        total: count,
+      };
+    });
+  }, [entries, selectedMonth]);
+
+  // Distribution by Estagiario Role (Recharts)
+  const distributionChartData = useMemo(() => {
+    const sumByRole: Record<string, number> = {
+      pos_graduacao: 0,
+      graduacao: 0,
+      pos: 0,
+    };
+    parsedEstagiariosData.forEach((e) => {
+      if (sumByRole[e.role] !== undefined) {
+        sumByRole[e.role] += e.totalAnalyzed || 0;
+      } else {
+        sumByRole.pos += e.totalAnalyzed || 0; // fallback
+      }
+    });
+    return [
+      {
+        name: "Pós-Graduação",
+        value: sumByRole.pos_graduacao || 0,
+        fill: "#4f46e5",
+      }, // indigo-600
+      { name: "Graduação", value: sumByRole.graduacao || 0, fill: "#0ea5e9" }, // sky-500
+      { name: "Outros/Geral", value: sumByRole.pos || 0, fill: "#10b981" }, // emerald-500
+    ].filter((x) => x.value > 0);
+  }, [parsedEstagiariosData]);
+
+  // List of all active month entries sorted chronologically (newest first)
+  const chronologicalEntries = useMemo(() => {
+    const list = entries.filter((e) => e.date.startsWith(selectedMonth));
+    list.sort((a, b) => {
+      const dateCompare = b.date.localeCompare(a.date);
+      if (dateCompare !== 0) return dateCompare;
+      const nameA =
+        estagiarios.find((as) => as.id === a.estagiarioId)?.name || "";
+      const nameB =
+        estagiarios.find((as) => as.id === b.estagiarioId)?.name || "";
+      return nameA.localeCompare(nameB);
+    });
+    return list;
+  }, [entries, selectedMonth, estagiarios]);
+
+  // Search-filtered list of chronological entries
+  const filteredChronologicalEntries = useMemo(() => {
+    if (!filterQuery.trim()) return chronologicalEntries;
+    const queryLower = filterQuery.toLowerCase();
+    return chronologicalEntries.filter((entry) => {
+      const estagiarioName =
+        estagiarios.find((as) => as.id === entry.estagiarioId)?.name || "";
+      return (
+        estagiarioName.toLowerCase().includes(queryLower) ||
+        entry.date.includes(queryLower)
+      );
+    });
+  }, [chronologicalEntries, filterQuery, estagiarios]);
+
+  useEffect(() => {
+    setHistoryPage(1);
+  }, [selectedMonth, filterQuery]);
+
+  const paginatedEntries = useMemo(() => {
+    const start = (historyPage - 1) * itemsPerPage;
+    return filteredChronologicalEntries.slice(start, start + itemsPerPage);
+  }, [filteredChronologicalEntries, historyPage]);
+  const totalHistoryPages =
+    Math.ceil(filteredChronologicalEntries.length / itemsPerPage) || 1;
+
+  // Trigger quick edit from Planilha/Matrix cells
+  const handleCellClick = (estagiarioId: string, date: string) => {
+    const lookupKey = `${estagiarioId}_${date}`;
+    const count = entriesMap[lookupKey] ?? 0;
+
+    setFormEstagiarioId(estagiarioId);
+    setFormDate(date);
+    setFormCount(count);
+    setFormEditingId(lookupKey);
+    setIsLaunchModalOpen(true);
+  };
+
+  // Reset/Empty cell completely
+  const handleCellClear = async (estagiarioId: string, date: string) => {
+    const lookupKey = `${estagiarioId}_${date}`;
+    if (entriesMap[lookupKey] === undefined) return;
+
+    try {
+      await deleteDoc(doc(db, "productivityEntries", lookupKey));
+      setEntries((prev) => prev.filter((item) => item.id !== lookupKey));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const renderSortIcon = (key: string) => {
+    if (teamSortConfig.key !== key)
+      return (
+        <ChevronDown className="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity" />
+      );
+    return teamSortConfig.dir === "asc" ? (
+      <ChevronUp className="w-3 h-3 text-indigo-500" />
+    ) : (
+      <ChevronDown className="w-3 h-3 text-indigo-500" />
+    );
+  };
+
+  if (isAuthLoading) {
+    return (
+      <div className="flex h-screen bg-slate-50 text-slate-900 items-center justify-center font-sans">
+        <div className="flex flex-col items-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mb-4"></div>
+          <p className="text-sm font-bold text-slate-500 uppercase tracking-wider">
+            Verificando Autenticação...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+
+
+
+
+  return (
+    <div className="flex h-screen bg-slate-50 text-slate-900 font-sans selection:bg-slate-900 selection:text-white overflow-hidden">
+      {/* Sidebar - Dashboard Style */}
+      <aside className="w-16 sm:w-20 bg-slate-950 text-slate-400 flex flex-col items-center py-6 border-r border-slate-800 z-20 shrink-0">
+        <div className="w-10 h-10 bg-indigo-500 text-white rounded-xl flex items-center justify-center font-black text-xl tracking-tight shadow-md mb-8">
+          V
+        </div>
+
+        <nav className="flex flex-col gap-6 flex-1 w-full items-center">
+          <button
+            onClick={() => setActiveTab("dashboard")}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+              activeTab === "dashboard"
+                ? "bg-indigo-500/20 text-indigo-400"
+                : "hover:text-slate-200 hover:bg-slate-800"
+            }`}
+            title="Dashboard"
+          >
+            <BarChart2 className="w-5 h-5" />
+          </button>
+          <button
+            onClick={() => setActiveTab("matrix")}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+              activeTab === "matrix"
+                ? "bg-indigo-500/20 text-indigo-400"
+                : "hover:text-slate-200 hover:bg-slate-800"
+            }`}
+            title="Matriz de Dados"
+          >
+            <Grid className="w-5 h-5" />
+          </button>
+          <button
+            onClick={() => setIsAddEstagiarioOpen(true)}
+            className="w-10 h-10 rounded-xl flex items-center justify-center hover:text-slate-200 hover:bg-slate-800 transition-all cursor-pointer"
+            title="Adicionar Estagiário"
+          >
+            <UserPlus className="w-5 h-5" />
+          </button>
+        </nav>
+
+        <div className="mt-auto flex flex-col gap-4 items-center">
+          <button
+            onClick={() => setIsSheetsModalOpen(true)}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+              spreadsheetUrl
+                ? "bg-emerald-500/20 text-emerald-400"
+                : "hover:text-slate-200 hover:bg-slate-800"
+            }`}
+            title="Integração Google Sheets"
+          >
+            <FileText className="w-5 h-5" />
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col h-full overflow-hidden relative">
+        {/* Header */}
+        <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 py-4 flex flex-col sm:flex-row justify-between items-center gap-4 z-10 sticky top-0">
+          <div className="flex items-center gap-3">
+            <div>
+              <h1 className="text-xl font-bold tracking-tight uppercase leading-none text-slate-900">
+                1ª Vice-Presidência
+              </h1>
+              <p className="text-xs text-slate-500 font-semibold tracking-wider uppercase mt-1">
+                Assessoria de Recursos • Produtividade
+              </p>
+            </div>
+          </div>
+
+          {/* Header Right Actions */}
+          <div className="flex flex-wrap items-center gap-4">
+            {/* Dynamic Clock Section */}
+            <div className="bg-slate-100/80 px-4 py-2 rounded-lg text-right hidden md:block border border-slate-200">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                {formattedDate}
+              </p>
+              <p className="text-sm font-black text-slate-800 tracking-wider font-mono">
+                {formattedTime}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {googleUser ? (
+                <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1.5 pl-2">
+                  {googleUser.photoURL ? (
+                    <img
+                      src={googleUser.photoURL}
+                      alt={googleUser.displayName || "Google User"}
+                      referrerPolicy="no-referrer"
+                      className="w-5 h-5 rounded-full border border-slate-300"
+                    />
+                  ) : (
+                    <div className="w-5 h-5 rounded-full bg-slate-800 text-white flex items-center justify-center font-bold text-[9px]">
+                      {googleUser.displayName?.charAt(0) || "U"}
+                    </div>
+                  )}
+                  <div className="hidden sm:block text-left max-w-[120px]">
+                    <p className="text-[10px] font-bold text-slate-850 truncate leading-none">
+                      {googleUser.displayName}
+                    </p>
+                    <p className="text-[8px] text-emerald-600 font-bold leading-none uppercase tracking-wider mt-0.5">
+                      Conta Ativa
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleGoogleLogout}
+                    className="px-2 py-0.5 bg-slate-150 hover:bg-red-50 text-slate-500 hover:text-red-600 rounded text-[9px] font-bold transition-all cursor-pointer border border-slate-200"
+                  >
+                    Sair
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleGoogleLogin}
+                  disabled={isLoggingInGoogle}
+                  className="px-3 py-2 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 transition-all flex items-center gap-2 cursor-pointer shadow-sm active:scale-[0.98]"
+                >
+                  <svg
+                    version="1.1"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 48 48"
+                    style={{ display: "block", width: "14px", height: "14px" }}
+                  >
+                    <path
+                      fill="#EA4335"
+                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                    ></path>
+                    <path
+                      fill="#4285F4"
+                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                    ></path>
+                    <path
+                      fill="#FBBC05"
+                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                    ></path>
+                    <path
+                      fill="#34A853"
+                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                    ></path>
+                  </svg>
+                  <span>
+                    {isLoggingInGoogle ? "Conectando..." : "Entrar com Google"}
+                  </span>
+                </button>
+              )}
+
+              {googleUser && (
+                <button
+                  id="btn-novo-lancamento"
+                  onClick={() => {
+                    setFormEditingId(null);
+                    setFormEstagiarioId(estagiarios[0]?.id || "");
+                    setFormDate(new Date().toISOString().split("T")[0]);
+                    setFormCount(0);
+                    setIsLaunchModalOpen(true);
+                  }}
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-indigo-700 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer shadow-sm"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span className="hidden sm:inline">NOVO LANÇAMENTO</span>
+                  <span className="sm:hidden">NOVO</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </header>
+
+        {/* Main Content Arena */}
+          <main className="flex-1 overflow-x-hidden overflow-y-auto p-4 sm:p-6 w-full mx-auto flex flex-col gap-6">
+            {/* Controls Bar */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+              <div className="flex items-center gap-3">
+                <div className="flex bg-slate-100 p-1 rounded-lg">
+                  <button
+                    onClick={() => setActiveTab("dashboard")}
+                    className={`px-4 py-2 rounded-md text-xs font-bold tracking-wide transition-all flex items-center gap-2 ${
+                      activeTab === "dashboard"
+                        ? "bg-white text-slate-900 shadow-sm"
+                        : "text-slate-500 hover:text-slate-900"
+                    }`}
+                  >
+                    <List className="w-4 h-4" />
+                    DASHBOARD
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("matrix")}
+                    className={`px-4 py-2 rounded-md text-xs font-bold tracking-wide transition-all flex items-center gap-2 ${
+                      activeTab === "matrix"
+                        ? "bg-white text-slate-900 shadow-sm"
+                        : "text-slate-500 hover:text-slate-900"
+                    }`}
+                  >
+                    <Grid className="w-4 h-4" />
+                    MATRIZ (PLANILHA)
+                  </button>
+                </div>
+
+                <div className="h-6 w-[1px] bg-slate-200"></div>
+
+                {/* Selected Month selector */}
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-slate-400" />
+                  <input
+                    type="month"
+                    id="select-month"
+                    value={selectedMonth}
+                    onChange={(e) => setSelectedMonth(e.target.value)}
+                    className="bg-transparent border-0 text-sm font-bold text-slate-800 focus:ring-0 cursor-pointer outline-none"
+                  />
+                </div>
+
+                {/* Quick Available Months Navigation */}
+                {availableMonths.length > 1 && (
+                  <div className="hidden lg:flex items-center gap-1.5 ml-1 pl-3 border-l border-slate-200">
+                    <span className="text-[10px] uppercase tracking-wider font-extrabold text-slate-400 mr-0.5">
+                      Meses com Dados:
+                    </span>
+                    {availableMonths.map((m) => {
+                      const [y, mm] = m.split("-");
+                      const monthNames: Record<string, string> = {
+                        "01": "Jan",
+                        "02": "Fev",
+                        "03": "Mar",
+                        "04": "Abr",
+                        "05": "Mai",
+                        "06": "Jun",
+                        "07": "Jul",
+                        "08": "Ago",
+                        "09": "Set",
+                        "10": "Out",
+                        "11": "Nov",
+                        "12": "Dez",
+                      };
+                      const label = `${monthNames[mm] || mm}/${y.substring(2)}`;
+                      const isActive = selectedMonth === m;
+                      return (
+                        <button
+                          key={m}
+                          onClick={() => setSelectedMonth(m)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-extrabold transition-all cursor-pointer ${
+                            isActive
+                              ? "bg-slate-900 text-white shadow-sm"
+                              : "bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-850"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Quick Search */}
+              <div className="relative max-w-xs w-full">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Buscar por estagiário..."
+                  value={filterQuery}
+                  onChange={(e) => setFilterQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 bg-slate-50 hover:bg-slate-100/50 border border-slate-200 focus:border-slate-400 focus:bg-white rounded-lg text-xs outline-none transition-all"
+                />
+              </div>
+            </div>
+
+            {/* Key Metrics row */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-white border border-slate-200 p-5 rounded-xl shadow-sm hover:border-slate-300 transition-all">
+                <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase mb-1">
+                  Total Analisado
+                </p>
+                <div className="flex items-baseline justify-between mt-2">
+                  <span className="text-3xl font-light text-slate-800">
+                    {globalMetrics.totalAnalyzed.toLocaleString("pt-BR")}
+                  </span>
+                  <span
+                    className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                      globalMetrics.monthGrowth > 0
+                        ? "bg-emerald-50 text-emerald-700"
+                        : globalMetrics.monthGrowth < 0
+                          ? "bg-red-50 text-red-700"
+                          : "bg-slate-50 text-slate-700"
+                    }`}
+                  >
+                    {globalMetrics.monthGrowth > 0 ? "+" : ""}
+                    {globalMetrics.monthGrowth.toFixed(1)}% m/m
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-white border border-slate-200 p-5 rounded-xl shadow-sm hover:border-slate-300 transition-all">
+                <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase mb-1">
+                  Estagiários Ativos
+                </p>
+                <div className="flex items-baseline justify-between mt-2">
+                  <span className="text-3xl font-light text-slate-800">
+                    {globalMetrics.activeCount}
+                  </span>
+                  <span className="text-xs text-slate-500 font-medium">
+                    de {globalMetrics.totalEstagiarios} cadastrados
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-white border border-slate-200 p-5 rounded-xl shadow-sm hover:border-slate-300 transition-all">
+                <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase mb-1">
+                  Média p/ Estagiário Ativo
+                </p>
+                <div className="flex items-baseline justify-between mt-2">
+                  <span className="text-3xl font-light text-slate-800">
+                    {globalMetrics.averagePerEstagiario.toLocaleString("pt-BR")}
+                  </span>
+                  <span className="text-xs font-semibold text-slate-500">
+                    processos / mês
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-white border border-slate-200 p-5 rounded-xl shadow-sm hover:border-slate-300 transition-all">
+                <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase mb-1">
+                  Meta Diária (Equipe)
+                </p>
+                <div className="flex items-baseline justify-between mt-2">
+                  <span className="text-3xl font-light text-slate-800">
+                    {globalMetrics.teamDailyGoal}
+                  </span>
+                  <span className="text-xs font-semibold text-slate-500">
+                    processos / dia
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Dashboard Layout vs Matrix Layout Grid */}
+            <AnimatePresence mode="wait">
+              {loading ? (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex flex-col items-center justify-center py-20 bg-white border border-slate-200 rounded-xl shadow-sm"
+                >
+                  <div className="w-10 h-10 border-2 border-slate-950 border-t-transparent rounded-full animate-spin"></div>
+                  <p className="text-sm font-semibold text-slate-500 mt-4">
+                    Carregando dados dos estagiários...
+                  </p>
+                </motion.div>
+              ) : activeTab === "dashboard" ? (
+                <motion.div
+                  key="dashboard-view"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="flex flex-col gap-6"
+                >
+                  {/* Charts Row */}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* Daily Productivity Bar/Line Chart */}
+                    <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+                      <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
+                        <TrendingUp className="w-4 h-4 text-indigo-500" />
+                        PRODUTIVIDADE DIÁRIA (
+                        {selectedMonth.split("-").reverse().join("/")})
+                      </h2>
+                      <div className="h-[250px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <ComposedChart
+                            data={dailyTrendsData}
+                            margin={{
+                              top: 10,
+                              right: 10,
+                              left: -20,
+                              bottom: 0,
+                            }}
+                          >
+                            <CartesianGrid
+                              strokeDasharray="3 3"
+                              vertical={false}
+                              stroke="#e2e8f0"
+                            />
+                            <XAxis
+                              dataKey="dia"
+                              axisLine={false}
+                              tickLine={false}
+                              tick={{ fontSize: 10, fill: "#64748b" }}
+                              dy={10}
+                            />
+                            <YAxis
+                              axisLine={false}
+                              tickLine={false}
+                              tick={{ fontSize: 10, fill: "#64748b" }}
+                            />
+                            <Tooltip
+                              cursor={{ fill: "#f1f5f9" }}
+                              contentStyle={{
+                                borderRadius: "8px",
+                                border: "none",
+                                boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
+                              }}
+                              labelStyle={{
+                                fontWeight: "bold",
+                                color: "#0f172a",
+                              }}
+                            />
+                            <Bar
+                              dataKey="total"
+                              fill="#818cf8"
+                              radius={[4, 4, 0, 0]}
+                              maxBarSize={40}
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="total"
+                              stroke="#4338ca"
+                              strokeWidth={2}
+                              dot={{ r: 3, fill: "#4338ca", strokeWidth: 0 }}
+                            />
+                          </ComposedChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    {/* Distribution Pie Chart */}
+                    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col">
+                      <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
+                        <Grid className="w-4 h-4 text-emerald-500" />
+                        DISTRIBUIÇÃO POR CATEGORIA
+                      </h2>
+                      <div className="h-[200px] w-full flex-1 flex items-center justify-center relative">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie
+                              data={distributionChartData}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={60}
+                              outerRadius={80}
+                              paddingAngle={5}
+                              dataKey="value"
+                              stroke="none"
+                            >
+                              {distributionChartData.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={entry.fill} />
+                              ))}
+                            </Pie>
+                            <Tooltip
+                              contentStyle={{
+                                borderRadius: "8px",
+                                border: "none",
+                                boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
+                              }}
+                              itemStyle={{
+                                fontWeight: "bold",
+                                color: "#0f172a",
+                              }}
+                            />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        {/* Centered Total */}
+                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                          <span className="text-2xl font-light text-slate-800">
+                            {globalMetrics.totalAnalyzed}
+                          </span>
+                          <span className="text-[10px] font-bold text-slate-400 uppercase">
+                            Processos
+                          </span>
+                        </div>
+                      </div>
+                      {/* Legend below */}
+                      <div className="flex flex-wrap gap-3 justify-center mt-2">
+                        {distributionChartData.map((entry, index) => (
+                          <div
+                            key={index}
+                            className="flex items-center gap-1.5"
+                          >
+                            <div
+                              className="w-3 h-3 rounded-sm"
+                              style={{ backgroundColor: entry.fill }}
+                            ></div>
+                            <span className="text-[10px] font-semibold text-slate-600">
+                              {entry.name} ({entry.value})
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Feito Hoje List */}
+                  <div className="bg-white border text-center border-indigo-200 rounded-xl shadow-sm overflow-hidden mb-0">
+                    <div className="p-4 bg-indigo-50 border-b border-indigo-100 flex items-center justify-between">
+                      <h2 className="text-sm font-bold tracking-tight text-indigo-900 flex items-center gap-2">
+                        <Zap className="w-4 h-4 text-emerald-500" />
+                        FEITO HOJE — TEMPO REAL
+                      </h2>
+                      <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-1 rounded-full uppercase tracking-wider animate-pulse">
+                        Atualização Automática
+                      </span>
+                    </div>
+                    <div className="p-4 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                      {parsedEstagiariosData
+                        .slice()
+                        .sort((a, b) => b.todayAnalyzed - a.todayAnalyzed)
+                        .map((est) => (
+                          <div
+                            key={est.id}
+                            className="bg-slate-50 hover:bg-white border border-slate-200 hover:border-indigo-300 transition-all rounded-lg p-3 flex flex-col items-center justify-center relative overflow-hidden group shadow-sm hover:shadow-md"
+                          >
+                            {est.todayAnalyzed >= est.dailyGoal && (
+                              <div className="absolute top-0 inset-x-0 h-1 bg-emerald-500"></div>
+                            )}
+                            {est.todayAnalyzed > 0 &&
+                              est.todayAnalyzed < est.dailyGoal && (
+                                <div className="absolute top-0 inset-x-0 h-1 bg-indigo-400"></div>
+                              )}
+                            <span
+                              className="text-xs font-bold text-slate-800 text-center uppercase truncate w-full"
+                              title={est.name}
+                            >
+                              {est.name}
+                            </span>
+                            <span
+                              className={`text-2xl font-light mt-1 ${est.todayAnalyzed > 0 ? "text-indigo-600" : "text-slate-300"}`}
+                            >
+                              {est.todayAnalyzed}
+                            </span>
+                            <span className="text-[9px] text-slate-400 font-mono mt-1 w-full text-center truncate">
+                              META: {est.dailyGoal}
+                            </span>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+
+                  {/* Performance Row */}
+                  <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                    {/* Left Column (Team Performance List) */}
+                    <div className="lg:col-span-3 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-hidden">
+                      <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                        <div>
+                          <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
+                            <Award className="w-4 h-4 text-slate-500" />
+                            DESEMPENHO DA EQUIPE —{" "}
+                            {selectedMonth.split("-").reverse().join("/")}
+                          </h2>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            Classificação dinâmica baseada em processos
+                            concluídos
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="overflow-x-auto w-full">
+                        <table className="w-full text-left border-collapse">
+                          <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-400 font-bold tracking-widest uppercase cursor-pointer select-none">
+                            <tr>
+                              <th
+                                className="px-6 py-3.5 group"
+                                onClick={() => handleTeamSort("name")}
+                              >
+                                <div className="flex items-center gap-1">
+                                  Estagiário {renderSortIcon("name")}
+                                </div>
+                              </th>
+                              <th
+                                className="px-4 py-3.5 text-center group"
+                                onClick={() => handleTeamSort("role")}
+                              >
+                                <div className="flex items-center justify-center gap-1">
+                                  Categoria / Meta {renderSortIcon("role")}
+                                </div>
+                              </th>
+                              <th
+                                className="px-4 py-3.5 text-center group"
+                                onClick={() => handleTeamSort("todayAnalyzed")}
+                              >
+                                <div className="flex items-center justify-center gap-1">
+                                  Feito Hoje {renderSortIcon("todayAnalyzed")}
+                                </div>
+                              </th>
+                              <th
+                                className="px-4 py-3.5 text-center group"
+                                onClick={() => handleTeamSort("totalAnalyzed")}
+                              >
+                                <div className="flex items-center justify-center gap-1">
+                                  Acumulado Mês{" "}
+                                  {renderSortIcon("totalAnalyzed")}
+                                </div>
+                              </th>
+                              <th
+                                className="px-4 py-3.5 text-center group"
+                                onClick={() => handleTeamSort("daysWorked")}
+                              >
+                                <div className="flex items-center justify-center gap-1">
+                                  Dias Ativos {renderSortIcon("daysWorked")}
+                                </div>
+                              </th>
+                              <th
+                                className="px-4 py-3.5 text-center font-mono group"
+                                onClick={() => handleTeamSort("averagePerDay")}
+                              >
+                                <div className="flex items-center justify-center gap-1">
+                                  Média/Dia {renderSortIcon("averagePerDay")}
+                                </div>
+                              </th>
+                              <th
+                                className="px-4 py-3.5 text-center group"
+                                onClick={() =>
+                                  handleTeamSort("goalProgressRatio")
+                                }
+                              >
+                                <div className="flex items-center justify-center gap-1">
+                                  Aproveitamento{" "}
+                                  {renderSortIcon("goalProgressRatio")}
+                                </div>
+                              </th>
+                              <th
+                                className="px-6 py-3.5 text-right group"
+                                onClick={() => handleTeamSort("status")}
+                              >
+                                <div className="flex items-center justify-end gap-1">
+                                  Status {renderSortIcon("status")}
+                                </div>
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="text-sm divide-y divide-slate-100">
+                            {filteredEstagiariosData.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={8}
+                                  className="px-6 py-10 text-center text-slate-400 font-medium"
+                                >
+                                  Nenhum estagiário encontrado com os filtros
+                                  atuais.
+                                </td>
+                              </tr>
+                            ) : (
+                              filteredEstagiariosData.map((item, idx) => {
+                                return (
+                                  <tr
+                                    key={item.id}
+                                    onClick={() =>
+                                      setSelectedEstagiarioDetail(item.id)
+                                    }
+                                    className="hover:bg-slate-50 cursor-pointer transition-colors"
+                                  >
+                                    <td className="px-6 py-4 font-semibold text-slate-800 flex items-center gap-2.5">
+                                      <div className="w-6 h-6 bg-slate-100 text-slate-700 rounded-full flex items-center justify-center text-xs font-bold font-mono">
+                                        {idx + 1}
+                                      </div>
+                                      {item.name}
+                                    </td>
+                                    <td className="px-4 py-4 text-center">
+                                      <span
+                                        className={`px-2 py-0.5 text-[9px] font-bold rounded ${
+                                          item.role === "pos_graduacao"
+                                            ? "bg-slate-200 text-slate-850 border border-slate-300"
+                                            : "bg-slate-100 text-slate-600 border border-slate-150"
+                                        }`}
+                                      >
+                                        {item.role === "pos_graduacao"
+                                          ? "Pós-Graduação"
+                                          : "Graduação"}
+                                      </span>
+                                      <span className="block text-[9px] text-slate-400 font-bold font-mono mt-1">
+                                        {item.dailyGoal}/dia
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-4 text-center">
+                                      <span className="font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-md text-xs border border-indigo-100">
+                                        {item.todayAnalyzed}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-4 text-center text-slate-800 font-bold">
+                                      {item.totalAnalyzed}
+                                    </td>
+                                    <td className="px-4 py-4 text-center text-slate-500">
+                                      {item.daysWorked} dias
+                                    </td>
+                                    <td className="px-4 py-4 text-center font-mono text-slate-600">
+                                      {item.averagePerDay > 0
+                                        ? item.averagePerDay
+                                        : "—"}
+                                    </td>
+                                    <td className="px-4 py-4 text-center">
+                                      <div className="flex flex-col items-center justify-center">
+                                        <span
+                                          className={`font-mono text-xs font-bold ${
+                                            item.goalProgressRatio >= 100
+                                              ? "text-emerald-605"
+                                              : item.goalProgressRatio >= 70
+                                                ? "text-blue-605"
+                                                : "text-amber-605"
+                                          }`}
+                                        >
+                                          {item.goalProgressRatio}%
+                                        </span>
+                                        <span className="text-[9px] text-slate-400 mt-0.5">
+                                          {item.daysMeetingGoal} d. batidos
+                                        </span>
+                                      </div>
+                                    </td>
+                                    <td className="px-6 py-4 text-right">
+                                      <span
+                                        className={`px-2.5 py-0.5 text-[10px] font-bold rounded-full ${
+                                          item.status === "ALTO"
+                                            ? "bg-emerald-50 text-emerald-700 border border-emerald-250"
+                                            : item.status === "NORMAL"
+                                              ? "bg-blue-50 text-blue-700 border border-blue-250"
+                                              : "bg-amber-50 text-amber-700 border border-amber-250"
+                                        }`}
+                                      >
+                                        {item.status}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Sidebar Info Panels */}
+                    <div className="flex flex-col gap-6">
+                      {/* unit progress card */}
+                      <div className="bg-slate-900 text-white rounded-xl p-5 shadow-sm relative overflow-hidden flex-1 flex flex-col justify-between">
+                        <div className="relative z-10">
+                          <h3 className="text-[10px] font-bold text-slate-400 tracking-widest uppercase mb-4">
+                            Categorias Estimadas
+                          </h3>
+                          <div className="space-y-4">
+                            {categorySplit.map((cat) => (
+                              <div key={cat.name}>
+                                <div className="flex justify-between text-[10px] mb-1.5 font-semibold text-slate-300">
+                                  <span>{cat.name}</span>
+                                  <span>{cat.pct}%</span>
+                                </div>
+                                <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full ${cat.color}`}
+                                    style={{ width: `${cat.pct}%` }}
+                                  ></div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Decorator */}
+                        <div className="absolute -bottom-8 -right-8 w-32 h-32 border-4 border-white/5 rounded-full z-0"></div>
+                      </div>
+
+                      {/* Guidelines explanation info */}
+                      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+                        <h3 className="text-[10px] text-slate-400 font-bold tracking-widest uppercase mb-3 flex items-center gap-1.5">
+                          <HelpCircle className="w-4 h-4 text-slate-400" />
+                          Prazo e Suporte
+                        </h3>
+                        <p className="text-xs text-slate-600 leading-relaxed mb-4">
+                          Selecione um estagiário na tabela para visualizar o
+                          histórico diário detalhado e editar lançamentos
+                          retroativos.
+                        </p>
+                        <button
+                          onClick={() => {
+                            alert(
+                              "Tabela de produtividade baseada nos dados do arquivo de referência da 1ª Vice-Presidência.",
+                            );
+                          }}
+                          className="w-full py-2 bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200 text-[10px] font-bold rounded transition-all cursor-pointer"
+                        >
+                          AJUDA E REGULAMENTO
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Diário de Lançamentos - Chronological Diary Section */}
+                  <div
+                    id="diario-de-lancamentos"
+                    className="bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-hidden"
+                  >
+                    <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row justify-between sm:items-center gap-3 bg-slate-50/50">
+                      <div>
+                        <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
+                          <Clock className="w-4 h-4 text-slate-500" />
+                          DIÁRIO DE LANÇAMENTOS — HISTÓRICO{" "}
+                          {selectedMonth.split("-").reverse().join("/")}
+                        </h2>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          Visão corrida e diária de todas as produtividades
+                          inseridas no mês de referência
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 font-mono text-[10px] bg-slate-100 border border-slate-200 px-3 py-1 rounded text-slate-600">
+                        <span>
+                          STATUS: {filteredChronologicalEntries.length} DIAS COM
+                          LANÇAMENTOS
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto w-full">
+                      <table className="w-full text-left border-collapse">
+                        <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-400 font-bold tracking-widest uppercase">
+                          <tr>
+                            <th className="px-6 py-3.5">Data do Caso</th>
+                            <th className="px-6 py-3.5">
+                              Estagiário Responsável
+                            </th>
+                            <th className="px-6 py-3.5 text-center">
+                              Processos Concluídos (Produtividade)
+                            </th>
+                            <th className="px-6 py-3.5 text-right">
+                              Ações Rápidas
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="text-sm divide-y divide-slate-100">
+                          {paginatedEntries.length === 0 ? (
+                            <tr>
+                              <td
+                                colSpan={4}
+                                className="px-6 py-12 text-center text-slate-400 font-medium"
+                              >
+                                Nenhum lançamento foi cadastrado neste mês sob
+                                os filtros aplicados. Insira dados usando o
+                                botão "+ Novo Lançamento" acima para alimentar o
+                                diário de produção.
+                              </td>
+                            </tr>
+                          ) : (
+                            paginatedEntries.map((entry) => {
+                              const associatedEstagiario = estagiarios.find(
+                                (a) => a.id === entry.estagiarioId,
+                              );
+                              const name = associatedEstagiario
+                                ? associatedEstagiario.name
+                                : entry.estagiarioId;
+                              return (
+                                <tr
+                                  key={entry.id}
+                                  className="hover:bg-slate-50 transition-colors"
+                                >
+                                  <td className="px-6 py-4 font-mono font-semibold text-slate-600">
+                                    {entry.date.split("-").reverse().join("/")}
+                                  </td>
+                                  <td className="px-6 py-4 font-bold text-slate-800">
+                                    {name}
+                                  </td>
+                                  <td className="px-6 py-4 text-center">
+                                    <span className="font-mono text-xs font-extrabold text-slate-900 bg-slate-100/80 px-3 py-1 rounded border border-slate-200/50">
+                                      {entry.count} concluídos
+                                    </span>
+                                  </td>
+                                  <td className="px-6 py-4 text-right">
+                                    <div className="flex justify-end gap-2">
+                                      <button
+                                        onClick={() => {
+                                          setFormEstagiarioId(
+                                            entry.estagiarioId,
+                                          );
+                                          setFormDate(entry.date);
+                                          setFormCount(entry.count);
+                                          setFormEditingId(entry.id);
+                                          setIsLaunchModalOpen(true);
+                                        }}
+                                        className="p-1 px-2 border border-slate-250 text-slate-500 hover:text-slate-800 rounded text-xs font-semibold flex items-center gap-1.5 bg-white hover:bg-slate-50 transition-all cursor-pointer"
+                                      >
+                                        <Edit3 className="w-3 h-3 text-slate-400" />
+                                        <span>Editar</span>
+                                      </button>
+                                      <button
+                                        onClick={() =>
+                                          handleDeleteEntry(entry.id)
+                                        }
+                                        className="p-1 px-2 border border-rose-100 text-rose-500 hover:text-rose-700 rounded text-xs font-semibold flex items-center gap-1.5 hover:bg-rose-50 transition-all cursor-pointer"
+                                      >
+                                        <Trash2 className="w-3 h-3 text-rose-400" />
+                                        <span>Excluir</span>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                    {/* Pagination Controls */}
+                    {totalHistoryPages > 1 && (
+                      <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 bg-slate-50/50">
+                        <span className="text-[11px] text-slate-500 font-bold uppercase tracking-widest">
+                          Página {historyPage} de {totalHistoryPages} (
+                          {filteredChronologicalEntries.length} Itens)
+                        </span>
+                        <div className="flex bg-white rounded-lg border border-slate-200 p-0.5 shadow-sm overflow-hidden text-sm">
+                          <button
+                            onClick={() =>
+                              setHistoryPage((p) => Math.max(1, p - 1))
+                            }
+                            disabled={historyPage === 1}
+                            className="px-3 py-1.5 font-bold text-slate-600 disabled:opacity-30 hover:bg-slate-50 cursor-pointer disabled:cursor-not-allowed transition-all"
+                          >
+                            Anterior
+                          </button>
+                          <div className="w-px bg-slate-200"></div>
+                          <button
+                            onClick={() =>
+                              setHistoryPage((p) =>
+                                Math.min(totalHistoryPages, p + 1),
+                              )
+                            }
+                            disabled={historyPage === totalHistoryPages}
+                            className="px-3 py-1.5 font-bold text-slate-600 disabled:opacity-30 hover:bg-slate-50 cursor-pointer disabled:cursor-not-allowed transition-all"
+                          >
+                            Próxima
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              ) : (
+                /* Matrix Spreadsheet Style Layout */
+                <motion.div
+                  key="matrix-view"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-hidden"
+                >
+                  <div className="p-5 border-b border-slate-100 flex flex-col md:flex-row justify-between md:items-center gap-3 bg-slate-50/50">
+                    <div>
+                      <h2 className="text-sm font-bold tracking-tight text-slate-900">
+                        MATRIZ COMPLETA DE PRODUTIVIDADE
+                      </h2>
+                      <p className="text-xs text-slate-400 mt-1">
+                        Exibindo os lançamentos diários na planilha. Clique em
+                        uma célula para atualizar ou inserir produtividade. O
+                        tom da cor indica a intensidade do lançamento.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      <div className="flex items-center gap-1">
+                        <span className="w-3.5 h-3.5 bg-slate-100 border border-slate-200 rounded"></span>
+                        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mr-2">
+                          0
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="w-3.5 h-3.5 bg-indigo-100 border border-indigo-200 rounded"></span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="w-3.5 h-3.5 bg-indigo-200 border border-indigo-400 rounded"></span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="w-3.5 h-3.5 bg-indigo-300 border border-indigo-400 rounded"></span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="w-3.5 h-3.5 bg-indigo-400 border border-indigo-500 rounded"></span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="w-3.5 h-3.5 bg-indigo-500 border border-indigo-600 rounded"></span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="w-3.5 h-3.5 bg-indigo-600 border border-indigo-700 rounded"></span>
+                        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider ml-1">
+                          Máx ({maxDailyCountInMonth})
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Responsive Spreadsheet Arena */}
+                  <div className="overflow-auto max-h-[600px] w-full">
+                    <table className="w-full text-left border-collapse table-fixed">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 divide-x divide-slate-200">
+                          {/* Top left blank / total header corner */}
+                          <th className="px-4 py-2.5 text-xs font-bold text-slate-700 min-w-[150px] sticky left-0 bg-slate-50 z-20 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
+                            Data (Dia)
+                          </th>
+                          <th className="px-3 py-2 text-center text-[10px] font-bold text-slate-500 uppercase tracking-widest min-w-[70px] bg-slate-100">
+                            TOTAL DIA
+                          </th>
+                          {estagiarios.map((estagiario) => (
+                            <th
+                              key={estagiario.id}
+                              title={estagiario.name}
+                              className="px-3 py-2 text-center text-xs font-bold text-slate-800 min-w-[110px] truncate"
+                            >
+                              {estagiario.name}
+                            </th>
+                          ))}
+                        </tr>
+
+                        {/* Summary row for Each Estagiario at the top */}
+                        <tr className="bg-slate-100 border-b-2 border-slate-300 divide-x divide-slate-200 font-semibold">
+                          <td className="px-4 py-3 text-xs font-bold text-slate-800 sticky left-0 bg-slate-100 z-20 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
+                            Acumulado Geral ({globalMetrics.totalAnalyzed})
+                          </td>
+                          <td className="px-3 py-3 text-center text-xs font-bold text-slate-900 bg-slate-200">
+                            {globalMetrics.totalAnalyzed}
+                          </td>
+                          {parsedEstagiariosData.map((estagiario) => (
+                            <td
+                              key={estagiario.id}
+                              className="px-3 py-3 text-center text-xs font-bold text-slate-900"
+                            >
+                              {estagiario.totalAnalyzed}
+                            </td>
+                          ))}
+                        </tr>
+                      </thead>
+
+                      <tbody className="divide-y divide-slate-200 text-xs">
+                        {daysInMonthList.map((dateStr) => {
+                          const dateObj = new Date(dateStr);
+                          const formattedDateString = dateStr
+                            .split("-")
+                            .reverse()
+                            .join("/");
+
+                          // Calculate row totals for this day
+                          const dayEntries = entries.filter(
+                            (e) => e.date === dateStr,
+                          );
+                          const dayTotalSum = dayEntries.reduce(
+                            (sum, item) => sum + item.count,
+                            0,
+                          );
+
+                          // Is weekend color shift
+                          const dayOfWeek = dateObj.getDay();
+                          const isWeekend = dayOfWeek === 5 || dayOfWeek === 6; // Friday/Saturday, or Saturday/Sunday in Standard. Let's look up Portuguese.
+                          // Saturday = 6, Sunday = 0
+                          const isRealWeekend =
+                            dayOfWeek === 6 || dayOfWeek === 0;
+
+                          const isFuture = dateStr > getCurrentDate();
+
+                          return (
+                            <tr
+                              key={dateStr}
+                              className={`divide-x divide-slate-200 transition-colors ${
+                                isRealWeekend ? "bg-slate-100/40" : ""
+                              } ${isFuture ? "opacity-40 pointer-events-none bg-slate-50" : "hover:bg-slate-50/80"}`}
+                            >
+                              {/* Date String */}
+                              <td
+                                className={`px-4 py-2 font-mono font-medium sticky left-0 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] z-10 ${isFuture ? "bg-slate-50 text-slate-400" : "bg-white text-slate-500"}`}
+                              >
+                                {formattedDateString}
+                              </td>
+
+                              {/* Row sum total */}
+                              <td
+                                className={`px-3 py-2 text-center font-mono font-bold ${isFuture ? "text-slate-400 bg-slate-100" : "text-slate-700 bg-slate-50"}`}
+                              >
+                                {dayTotalSum || 0}
+                              </td>
+
+                              {/* Accessor Cells */}
+                              {estagiarios.map((estagiario) => {
+                                const count =
+                                  entriesMap[`${estagiario.id}_${dateStr}`];
+                                const hasValue =
+                                  count !== undefined && count > 0;
+
+                                return (
+                                  <td
+                                    key={estagiario.id}
+                                    onClick={() =>
+                                      !isFuture &&
+                                      handleCellClick(estagiario.id, dateStr)
+                                    }
+                                    onContextMenu={(e) => {
+                                      e.preventDefault();
+                                      if (!isFuture)
+                                        handleCellClear(estagiario.id, dateStr);
+                                    }}
+                                    title={
+                                      isFuture
+                                        ? "Data Futura"
+                                        : "Clique para editar / Botão direito para limpar"
+                                    }
+                                    className={`px-2 py-2 text-center font-mono text-xs ${!isFuture ? "cursor-pointer transition-all hover:brightness-95" : "cursor-not-allowed"} ${
+                                      isFuture
+                                        ? "bg-slate-100/20 text-slate-300 font-normal"
+                                        : getHeatmapColor(
+                                            count,
+                                            maxDailyCountInMonth,
+                                          )
+                                    }`}
+                                  >
+                                    {count !== undefined ? count : 0}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </main>
+
+        {/* Footer */}
+        <footer className="mt-auto px-6 py-4 bg-white border-t border-slate-200 text-[10px] text-slate-400 font-semibold tracking-wide flex flex-col md:flex-row justify-between items-center gap-2">
+          <p>
+            © 2026 SISTEMA DE GESTÃO DE PRODUTIVIDADE - 1ª VICE-PRESIDÊNCIA
+            (Estagiarioia de Recursos)
+          </p>
+          <p>VERSÃO 1.1.2 • FIREBASE PERSISTENTE</p>
+        </footer>
+
+        {/* MODAL: NOVO REGISTRO / LANÇAMENTO */}
+        <AnimatePresence>
+          {isLaunchModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              {/* Backdrop */}
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsLaunchModalOpen(false)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              ></motion.div>
+
+              {/* Content Card */}
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-md w-full overflow-hidden relative z-10"
+              >
+                <div className="bg-slate-900 text-white px-6 py-4 flex justify-between items-center">
+                  <h3 className="text-sm font-bold uppercase tracking-wider">
+                    {formEditingId
+                      ? "Editar Lançamento"
+                      : "Novo Lançamento Diário"}
+                  </h3>
+                  <button
+                    onClick={() => setIsLaunchModalOpen(false)}
+                    className="text-slate-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <form onSubmit={handleSaveEntry} className="p-6 space-y-4">
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                      Estagiário Responsável
+                    </label>
+                    <select
+                      id="select-estagiario"
+                      value={formEstagiarioId}
+                      onChange={(e) => setFormEstagiarioId(e.target.value)}
+                      required
+                      disabled={!!formEditingId}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium outline-none focus:border-slate-400 focus:bg-white"
+                    >
+                      <option value="" disabled>
+                        Selecione um estagiário...
+                      </option>
+                      {estagiarios.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                        Data de Referência
+                      </label>
+                      <input
+                        type="date"
+                        value={formDate}
+                        onChange={(e) => setFormDate(e.target.value)}
+                        required
+                        disabled={!!formEditingId}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-slate-400 focus:bg-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                        Processos Analisados
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={formCount === 0 ? "" : formCount}
+                        onChange={(e) =>
+                          setFormCount(Math.max(0, Number(e.target.value)))
+                        }
+                        required
+                        placeholder="Qtd."
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold outline-none focus:border-slate-400 focus:bg-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-4 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsLaunchModalOpen(false)}
+                      className="flex-1 py-2 border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-bold text-slate-500 cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSaving}
+                      className="flex-1 py-2 bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                    >
+                      {isSaving ? "Salvando..." : "Confirmar Lançamento"}
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* MODAL: NOVO ESTAGIARIO */}
+        <AnimatePresence>
+          {isAddEstagiarioOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsAddEstagiarioOpen(false)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              ></motion.div>
+
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-sm w-full overflow-hidden relative z-10"
+              >
+                <div className="bg-slate-900 text-white px-6 py-4 flex justify-between items-center">
+                  <h3 className="text-sm font-bold uppercase tracking-wider">
+                    Adicionar Estagiário à Equipe
+                  </h3>
+                  <button
+                    onClick={() => setIsAddEstagiarioOpen(false)}
+                    className="text-slate-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <form onSubmit={handleAddEstagiario} className="p-6 space-y-4">
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                      Nome Completo / Identificador
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={newEstagiarioName}
+                      onChange={(e) => setNewEstagiarioName(e.target.value)}
+                      placeholder="Ex: Dra. Helena Souza"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-slate-400 focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                      Código ID Exclusivo (Opcional)
+                    </label>
+                    <input
+                      type="text"
+                      value={newEstagiarioId}
+                      onChange={(e) => setNewEstagiarioId(e.target.value)}
+                      placeholder="Ex: helena_souza (Gerado automático se vazio)"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-mono outline-none focus:border-slate-400 focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                      Número de Matrícula / Registro
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: 123456"
+                      value={newEstagiarioMatricula}
+                      onChange={(e) =>
+                        setNewEstagiarioMatricula(e.target.value)
+                      }
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-slate-400 focus:bg-white font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                      Categoria / Tipo de Estagiário
+                    </label>
+                    <select
+                      value={newEstagiarioRole}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setNewEstagiarioRole(val);
+                        setNewEstagiarioDailyGoal(
+                          val === "pos_graduacao" ? 30 : 25,
+                        );
+                      }}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-slate-400 focus:bg-white cursor-pointer font-bold text-slate-800"
+                    >
+                      <option value="pos_graduacao">
+                        Estagiário de Pós-Graduação (Meta: 30/dia)
+                      </option>
+                      <option value="graduacao">
+                        Estagiário de Graduação (Meta: 25/dia)
+                      </option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                      Meta Diária (Processos / Dia)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      required
+                      value={newEstagiarioDailyGoal}
+                      onChange={(e) =>
+                        setNewEstagiarioDailyGoal(
+                          Math.max(1, Number(e.target.value) || 0),
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-mono outline-none focus:border-slate-400 focus:bg-white"
+                    />
+                  </div>
+
+                  <div className="pt-4 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsAddEstagiarioOpen(false)}
+                      className="flex-1 py-2 border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-bold text-slate-500 cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSaving}
+                      className="flex-1 py-2 bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                    >
+                      {isSaving ? "Adicionando..." : "Cadastrar Estagiário"}
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* DRAWER/MODAL: DETALHES DO ESTAGIARIO */}
+        <AnimatePresence>
+          {selectedEstagiarioDetail && (
+            <div className="fixed inset-0 z-50 flex items-center justify-end">
+              {/* Backdrop */}
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setSelectedEstagiarioDetail(null)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs"
+              ></motion.div>
+
+              {/* Sidebar content card */}
+              <motion.div
+                initial={{ x: "100%" }}
+                animate={{ x: 0 }}
+                exit={{ x: "100%" }}
+                transition={{ type: "spring", damping: 25, stiffness: 220 }}
+                className="relative w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 flex flex-col z-10"
+              >
+                {/* Header inside detailing drawer */}
+                {(() => {
+                  const detailedEstagiario = parsedEstagiariosData.find(
+                    (a) => a.id === selectedEstagiarioDetail,
+                  );
+                  if (!detailedEstagiario) return null;
+
+                  return (
+                    <>
+                      {isEditingCadastre ? (
+                        <form
+                          onSubmit={handleUpdateEstagiarioCadastre}
+                          className="p-6 bg-slate-150 border-b border-slate-250 space-y-3"
+                        >
+                          <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 mb-2">
+                            Editar Cadastro do Estagiário
+                          </h4>
+
+                          <div>
+                            <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                              Nome Completo
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={editEstagiarioName}
+                              onChange={(e) =>
+                                setEditEstagiarioName(e.target.value)
+                              }
+                              className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-sm outline-none focus:border-slate-400 text-slate-800 font-medium"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                              Número de Matrícula
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="Ex: 123456"
+                              value={editEstagiarioMatricula}
+                              onChange={(e) =>
+                                setEditEstagiarioMatricula(e.target.value)
+                              }
+                              className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-sm outline-none focus:border-slate-400 text-slate-800 font-medium font-mono"
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                                Categoria / Tipo
+                              </label>
+                              <select
+                                value={editEstagiarioRole}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setEditEstagiarioRole(val);
+                                  setEditEstagiarioDailyGoal(
+                                    val === "pos_graduacao" ? 30 : 25,
+                                  );
+                                }}
+                                className="w-full px-2 py-1.5 bg-white border border-slate-250 rounded-lg text-xs outline-none focus:border-slate-400 cursor-pointer font-bold text-slate-700"
+                              >
+                                <option value="pos_graduacao">
+                                  Pós-Graduação
+                                </option>
+                                <option value="graduacao">Graduação</option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
+                                Meta Diária
+                              </label>
+                              <input
+                                type="number"
+                                min="1"
+                                required
+                                value={editEstagiarioDailyGoal}
+                                onChange={(e) =>
+                                  setEditEstagiarioDailyGoal(
+                                    Math.max(1, Number(e.target.value) || 1),
+                                  )
+                                }
+                                className="w-full px-2 py-1.5 bg-white border border-slate-250 rounded-lg text-xs font-mono outline-none focus:border-slate-400 text-slate-800"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex gap-2 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => setIsEditingCadastre(false)}
+                              className="flex-1 py-1.5 border border-slate-200 bg-white rounded-lg text-xs font-bold text-slate-500 hover:bg-slate-50 cursor-pointer"
+                            >
+                              Cancelar
+                            </button>
+                            <button
+                              type="submit"
+                              disabled={isSaving}
+                              className="flex-1 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-bold hover:bg-slate-805 disabled:opacity-50 cursor-pointer"
+                            >
+                              {isSaving ? "Salvando..." : "Salvar"}
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <div className="p-6 bg-slate-900 text-white flex justify-between items-start">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-base font-bold">
+                                {detailedEstagiario.name}
+                              </h4>
+                              <button
+                                onClick={() => {
+                                  setEditEstagiarioName(
+                                    detailedEstagiario.name,
+                                  );
+                                  setEditEstagiarioRole(
+                                    detailedEstagiario.role || "pos",
+                                  );
+                                  setEditEstagiarioDailyGoal(
+                                    detailedEstagiario.dailyGoal ??
+                                      (detailedEstagiario.role ===
+                                      "pos_graduacao"
+                                        ? 30
+                                        : 25),
+                                  );
+                                  setEditEstagiarioMatricula(
+                                    detailedEstagiario.matricula || "",
+                                  );
+                                  setIsEditingCadastre(true);
+                                }}
+                                className="p-1 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                                title="Editar cadastro do estagiário"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                            </div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-1 flex flex-wrap items-center gap-1.5">
+                              <span className="px-1.5 py-0.5 bg-slate-800 text-slate-300 rounded text-[9px]">
+                                {detailedEstagiario.role === "pos_graduacao"
+                                  ? "Pós-Graduação"
+                                  : "Graduação"}
+                              </span>
+                              {detailedEstagiario.matricula && (
+                                <span className="px-1.5 py-0.5 bg-emerald-950 text-emerald-200 border border-emerald-800 rounded text-[9px] font-mono">
+                                  Matrícula: {detailedEstagiario.matricula}
+                                </span>
+                              )}
+                              <span>
+                                • Meta Diária: {detailedEstagiario.dailyGoal}
+                              </span>
+                            </p>
+                            <p className="text-[9px] text-slate-500 font-mono mt-1">
+                              Consolidação Individual • {selectedMonth}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => setSelectedEstagiarioDetail(null)}
+                            className="text-slate-400 hover:text-white transition-colors cursor-pointer"
+                          >
+                            <X className="w-5 h-5" />
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Stats strip inside detail panel */}
+                      <div className="grid grid-cols-4 divide-x divide-slate-100 bg-slate-50 border-b border-slate-200">
+                        <div className="p-3 text-center">
+                          <span className="block text-[8px] text-slate-400 font-bold uppercase tracking-wide">
+                            Total Mês
+                          </span>
+                          <span className="text-base font-bold text-slate-800">
+                            {detailedEstagiario.totalAnalyzed}
+                          </span>
+                        </div>
+                        <div className="p-3 text-center">
+                          <span className="block text-[8px] text-slate-400 font-bold uppercase tracking-wide">
+                            Dias Ativos
+                          </span>
+                          <span className="text-base font-bold text-slate-800">
+                            {detailedEstagiario.daysWorked}
+                          </span>
+                        </div>
+                        <div className="p-3 text-center">
+                          <span className="block text-[8px] text-slate-400 font-bold uppercase tracking-wide">
+                            Média Diária
+                          </span>
+                          <span className="text-base font-bold text-slate-800">
+                            {detailedEstagiario.averagePerDay}
+                          </span>
+                        </div>
+                        <div className="p-3 text-center">
+                          <span className="block text-[8px] text-slate-400 font-bold uppercase tracking-wide">
+                            Meta Batida
+                          </span>
+                          <span
+                            className="text-base font-bold text-emerald-600 font-mono"
+                            title={`${detailedEstagiario.daysMeetingGoal} dias atingindo a meta diária de ${detailedEstagiario.dailyGoal}`}
+                          >
+                            {detailedEstagiario.daysMeetingGoal} d
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Detailed List of individual records */}
+                      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                        <h5 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">
+                          Histórico de Lançamentos
+                        </h5>
+
+                        {detailedEstagiario.entriesList.length === 0 ? (
+                          <div className="p-8 text-center text-slate-400">
+                            <Clock className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                            Nenhum lançamento cadastrado para este período.
+                          </div>
+                        ) : (
+                          <div className="divide-y divide-slate-100 border border-slate-100 rounded-lg overflow-hidden shadow-sm">
+                            {detailedEstagiario.entriesList.map((entry) => (
+                              <div
+                                key={entry.id}
+                                className="p-3 bg-white hover:bg-slate-50 flex justify-between items-center transition-colors"
+                              >
+                                <div className="flex items-center gap-2.5">
+                                  <CalendarDays className="w-4 h-4 text-slate-400" />
+                                  <div>
+                                    <span className="block text-xs font-bold text-slate-700">
+                                      {entry.date
+                                        .split("-")
+                                        .reverse()
+                                        .join("/")}
+                                    </span>
+                                    <span className="text-[10px] text-slate-400">
+                                      Ano de Referência:{" "}
+                                      {entry.date.split("-")[0]}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  <span className="font-mono text-xs font-bold text-slate-900 bg-slate-100 px-2 py-1 rounded">
+                                    {entry.count} conclúidos
+                                  </span>
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      onClick={() => {
+                                        setFormEstagiarioId(entry.estagiarioId);
+                                        setFormDate(entry.date);
+                                        setFormCount(entry.count);
+                                        setFormEditingId(entry.id);
+                                        setIsLaunchModalOpen(true);
+                                      }}
+                                      className="p-1 text-slate-400 hover:text-slate-700 transition-colors"
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() =>
+                                        handleDeleteEntry(entry.id)
+                                      }
+                                      className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  );
+                })()}
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* MODAL: INTEGRAÇÃO COM PLANILHA GOOGLE & COPIAR/COLAR */}
+        <AnimatePresence>
+          {isSheetsModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsSheetsModalOpen(false)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              ></motion.div>
+
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-2xl w-full overflow-hidden relative z-10 flex flex-col max-h-[90vh]"
+              >
+                <div className="bg-emerald-800 text-white px-6 py-4 flex justify-between items-center">
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-5 h-5" />
+                    <h3 className="text-sm font-bold uppercase tracking-wider">
+                      Sincronização com Planilha Google / Excel
+                    </h3>
+                  </div>
+                  <button
+                    onClick={() => setIsSheetsModalOpen(false)}
+                    className="text-emerald-200 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="p-6 overflow-y-auto space-y-6">
+                  {/* Google Auth Integration Section */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4.5">
+                    <h4 className="text-xs font-bold text-slate-850 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse"></span>
+                      Segurança de Dados: Acesso Privado ao Google Drive
+                    </h4>
+                    <p className="text-xs text-slate-600 mb-3.5 leading-relaxed">
+                      Você pode conectar sua conta Google{" "}
+                      <strong>com sua permissão</strong> para acessar planilhas
+                      privadas diretamente do seu Google Drive, sem precisar
+                      expô-las de forma pública ("Qualquer pessoa com o link
+                      pode ler").
+                    </p>
+
+                    {googleUser ? (
+                      <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                        <div className="flex items-center gap-2.5">
+                          {googleUser.photoURL ? (
+                            <img
+                              src={googleUser.photoURL}
+                              alt={googleUser.displayName || "Google User"}
+                              referrerPolicy="no-referrer"
+                              className="w-8 h-8 rounded-full border border-emerald-300"
+                            />
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-emerald-700 text-white flex items-center justify-center font-bold text-xs animate-fade-in">
+                              {googleUser.displayName?.charAt(0) || "U"}
+                            </div>
+                          )}
+                          <div>
+                            <p className="text-xs font-bold text-emerald-950">
+                              Conectado: {googleUser.displayName}
+                            </p>
+                            <p className="text-[10px] text-emerald-700 font-mono">
+                              {googleUser.email}
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={handleGoogleLogout}
+                          className="px-3 py-1.5 bg-red-100 text-red-700 hover:bg-red-200 border border-red-200 rounded-md text-[11px] font-bold transition-all cursor-pointer"
+                        >
+                          Sair do Google
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-white border border-slate-200 rounded-lg p-3">
+                        <div className="flex-1">
+                          <p className="text-xs font-bold text-slate-800">
+                            Conecte sua conta do Google
+                          </p>
+                          <p className="text-[10px] text-slate-400 mt-0.5 animate-pulse">
+                            Permite leitura direta do seu Drive sem precisar
+                            deixar a planilha pública.
+                          </p>
+                        </div>
+                        <button
+                          onClick={handleGoogleLogin}
+                          disabled={isLoggingInGoogle}
+                          className="gsi-material-button text-xs py-1.5 px-3 self-start sm:self-center border border-slate-300 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer font-bold rounded-lg bg-white"
+                          style={{ height: "36px" }}
+                        >
+                          <svg
+                            version="1.1"
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 48 48"
+                            style={{
+                              display: "block",
+                              width: "16px",
+                              height: "16px",
+                            }}
+                          >
+                            <path
+                              fill="#EA4335"
+                              d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                            ></path>
+                            <path
+                              fill="#4285F4"
+                              d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                            ></path>
+                            <path
+                              fill="#FBBC05"
+                              d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                            ></path>
+                            <path
+                              fill="#34A853"
+                              d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                            ></path>
+                          </svg>
+                          <span>
+                            {isLoggingInGoogle
+                              ? "Conectando..."
+                              : "Entrar com o Google"}
+                          </span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Connection Section */}
+                  <div className="bg-emerald-50/50 border border-emerald-100 rounded-xl p-4.5">
+                    <h4 className="text-xs font-bold text-emerald-900 uppercase tracking-wider mb-2">
+                      Opção A: Integração em Tempo Real por Link
+                    </h4>
+                    <p className="text-xs text-slate-600 mb-3 leading-relaxed">
+                      Acompanhe em tempo real as atualizações de sua equipe.
+                      Cole o link do seu Google Planilhas.
+                    </p>
+
+                    {/* Step-by-step Quick Guide */}
+                    <div className="my-3 p-3 bg-white border border-emerald-100 rounded-lg space-y-2 text-[11px] text-slate-700 leading-relaxed">
+                      <p className="font-bold text-emerald-800 uppercase tracking-wide text-[10px]">
+                        💡 Formatação de Colunas Sucedida:
+                      </p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        <li>
+                          <strong>Formato Matriz (Mais prático):</strong> A
+                          primeira coluna deve se chamar{" "}
+                          <code className="bg-slate-100 px-1 py-0.5 rounded text-rose-600 font-mono">
+                            Data
+                          </code>
+                          . As demais colunas devem ser os{" "}
+                          <strong>nomes dos estagiários</strong>. Cada célula
+                          receberá o número de processos daquele dia.
+                        </li>
+                        <li>
+                          <strong>Formato Lista:</strong> Deve conter as colunas{" "}
+                          <code className="bg-slate-100 px-1 py-0.5 rounded text-rose-600 font-mono">
+                            Data
+                          </code>
+                          ,{" "}
+                          <code className="bg-slate-100 px-1 py-0.5 rounded text-rose-600 font-mono">
+                            Estagiário
+                          </code>{" "}
+                          (ou Nome) e{" "}
+                          <code className="bg-slate-100 px-1 py-0.5 rounded text-rose-600 font-mono">
+                            Quantidade
+                          </code>{" "}
+                          (ou Casos/Produtividade).
+                        </li>
+                        <li>
+                          <strong>Auto-Cadastro Automático:</strong> Qualquer
+                          estagiário novo inserido na planilha será{" "}
+                          <strong>criado automaticamente</strong> e vinculado
+                          aos seus respectivos números de processos.
+                          Duplicidades e redundâncias de lançamentos são
+                          consolidadas e somadas de forma limpa!
+                        </li>
+                      </ul>
+                      <div className="pt-1.5 border-t border-slate-100 text-[10px] text-slate-500">
+                        <strong>Acesso Público:</strong> Selecione "Arquivo"
+                        &gt; "Compartilhar" &gt; "Qualquer pessoa com o link"
+                        (Leitor) ou publique a planilha na web.
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      {lastSyncTime && spreadsheetUrl && (
+                        <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-800 rounded-lg text-xs space-y-1">
+                          <div className="flex items-center gap-1.5 font-bold">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                            Planilha Vinculada no Banco de Dados
+                          </div>
+                          <p className="text-slate-600 font-mono text-[10px] truncate">
+                            {spreadsheetUrl}
+                          </p>
+                          <p className="text-[10px] text-emerald-700">
+                            Última sincronização efetuada em:{" "}
+                            <strong>
+                              {new Date(lastSyncTime).toLocaleString("pt-BR")}
+                            </strong>
+                          </p>
+                        </div>
+                      )}
+
+                      {sheetSyncError && (
+                        <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-900 rounded-lg text-xs space-y-1">
+                          <div className="flex items-center gap-1.5 font-bold text-rose-800">
+                            <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+                            Atenção na Sincronização
+                          </div>
+                          <p className="text-slate-700 text-[11px] leading-relaxed">
+                            {sheetSyncError}
+                          </p>
+                          {!googleUser && (
+                            <p className="text-[10px] text-rose-800 font-bold mt-1">
+                              👉 Dica: Se a sua planilha é privada, clique no
+                              botão{" "}
+                              <strong>
+                                "Segurança de Dados: Acesso Privado"
+                              </strong>{" "}
+                              acima para conectar sua conta Google e autorizar o
+                              acesso.
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex gap-2">
+                        <input
+                          type="url"
+                          placeholder="Cole o link do Google Sheets ou Planilha Publicada..."
+                          value={spreadsheetUrl}
+                          onChange={(e) => setSpreadsheetUrl(e.target.value)}
+                          className="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs outline-none focus:border-emerald-500 font-mono"
+                        />
+                        <button
+                          onClick={() =>
+                            triggerSheetsSync(spreadsheetUrl, estagiarios)
+                          }
+                          disabled={syncingSheets}
+                          className="bg-emerald-700 text-white hover:bg-emerald-800 px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 font-sans shrink-0"
+                        >
+                          {syncingSheets
+                            ? "Sincronizando..."
+                            : "Sincronizar Já"}
+                        </button>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-emerald-100/50">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="chk-auto-sync"
+                            checked={autoSyncEnabled}
+                            onChange={(e) =>
+                              setAutoSyncEnabled(e.target.checked)
+                            }
+                            className="w-4 h-4 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500"
+                          />
+                          <label
+                            htmlFor="chk-auto-sync"
+                            className="text-xs font-bold text-slate-700 cursor-pointer"
+                          >
+                            Sincronizar automaticamente ao carregar o site
+                            (Real-Time Ativo)
+                          </label>
+                        </div>
+
+                        <div className="flex gap-2 shrink-0">
+                          {spreadsheetUrl && (
+                            <button
+                              onClick={handleUnlinkSheet}
+                              className="px-3 py-1.5 border border-red-200 text-red-700 hover:bg-red-50 rounded-lg text-[11px] font-bold transition-all cursor-pointer"
+                            >
+                              Remover Vínculo
+                            </button>
+                          )}
+                          <button
+                            onClick={handleSaveSheetSettings}
+                            disabled={isSaving}
+                            className="bg-slate-900 text-white hover:bg-slate-800 px-3.5 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer disabled:opacity-55"
+                          >
+                            {isSaving
+                              ? "Gravando e Sincronizando..."
+                              : "Salvar Vínculo"}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Direct clipboard copy paste area */}
+                  <div className="border border-slate-200 rounded-xl p-4.5 bg-slate-50/50">
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
+                      Opção B: Cola Rápido da Área de Trabalho (Suporte Excel /
+                      TSV)
+                    </h4>
+                    <p className="text-xs text-slate-650 text-slate-500 mb-3 leading-relaxed">
+                      Não quer configurar links? Copie as linhas da sua planilha
+                      (contendo colunas como Data, Nome do Estagiário, Casos
+                      Concluídos) e cole-as abaixo:
+                    </p>
+
+                    <textarea
+                      rows={4}
+                      placeholder="Cole aqui (Ex:&#10;Data;Estagiário;Quantidade&#10;18/06/2026;Dr. Antonio;12&#10;18/06/2026;Dra. Jane;8)"
+                      value={pasteDataText}
+                      onChange={(e) => setPasteDataText(e.target.value)}
+                      className="w-full p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-mono outline-none focus:border-slate-500 mb-2.5 resize-none"
+                    ></textarea>
+
+                    <div className="flex justify-end">
+                      <button
+                        onClick={handleImportPastedData}
+                        className="px-4 py-1.5 bg-slate-900 text-white hover:bg-slate-800 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                      >
+                        Processar Dados Colados
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Preview Section */}
+                  {(previewEntries.length > 0 ||
+                    previewEstagiariosToCreate.length > 0 ||
+                    sheetsMessage) && (
+                    <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+                      <div className="px-4 py-2.5 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-800 uppercase">
+                          Prévia dos Dados Processados
+                        </span>
+                        <span className="text-[10px] bg-emerald-50 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
+                          Formato Válido Detectado
+                        </span>
+                      </div>
+
+                      <div className="p-4 space-y-3.5 max-h-48 overflow-y-auto">
+                        {sheetsMessage && (
+                          <p className="text-[11px] font-semibold text-slate-650 text-emerald-800 bg-emerald-50 p-2 rounded">
+                            {sheetsMessage}
+                          </p>
+                        )}
+
+                        {previewEstagiariosToCreate.length > 0 && (
+                          <div>
+                            <p className="text-xs font-bold text-amber-700 uppercase tracking-wide mb-1">
+                              ⚠️ Novos Estagiários que serão auto-criados (
+                              {previewEstagiariosToCreate.length}):
+                            </p>
+                            <div className="flex flex-wrap gap-1">
+                              {previewEstagiariosToCreate.map((name, i) => (
+                                <span
+                                  key={i}
+                                  className="text-[10px] bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-0.5 rounded-full font-semibold"
+                                >
+                                  {name}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {previewEntries.length > 0 && (
+                          <div>
+                            <p className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-1.5">
+                              Lançamentos de Produtividade a Importar (
+                              {previewEntries.length}):
+                            </p>
+                            <table className="w-full text-left font-mono text-[11px] border-collapse">
+                              <thead>
+                                <tr className="bg-slate-100/80 border-b border-slate-200 text-[10px] text-slate-500 font-bold lowercase">
+                                  <th className="p-1 px-2">Data</th>
+                                  <th className="p-1 px-2">Estagiário Cod</th>
+                                  <th className="p-1 px-2 text-right">
+                                    Processos_Concluídos
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {previewEntries
+                                  .slice(0, 10)
+                                  .map((entry, index) => (
+                                    <tr
+                                      key={index}
+                                      className="border-b border-slate-100"
+                                    >
+                                      <td className="p-1 px-2">
+                                        {entry.date
+                                          .split("-")
+                                          .reverse()
+                                          .join("/")}
+                                      </td>
+                                      <td className="p-1 px-2 font-semibold text-slate-700">
+                                        {entry.estagiarioId}
+                                      </td>
+                                      <td className="p-1 px-2 text-right font-bold">
+                                        {entry.count}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                {previewEntries.length > 10 && (
+                                  <tr>
+                                    <td
+                                      colSpan={3}
+                                      className="p-1 py-1 px-2 text-[10px] text-slate-400 italic text-center"
+                                    >
+                                      + {previewEntries.length - 10} linhas
+                                      ocultadas da visualização rápida...
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-3 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
+                        <span className="text-[11px] font-semibold text-emerald-800 flex items-center gap-1 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg animate-pulse">
+                          ✨ Dados sincronizados e gravados no Banco com
+                          sucesso!
+                        </span>
+                        <button
+                          onClick={() => {
+                            setIsSheetsModalOpen(false);
+                            setPreviewEntries([]);
+                            setPreviewEstagiariosToCreate([]);
+                            setPreviewEstagiariosDetailed([]);
+                            setPasteDataText("");
+                          }}
+                          className="w-full sm:w-auto px-5 py-2 bg-emerald-800 text-white hover:bg-emerald-900 text-xs font-extrabold rounded-lg transition-all cursor-pointer shadow"
+                        >
+                          Confirmar e Fechar
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
+                  <button
+                    onClick={() => {
+                      setIsSheetsModalOpen(false);
+                      setPreviewEntries([]);
+                      setPreviewEstagiariosToCreate([]);
+                      setPreviewEstagiariosDetailed([]);
+                      setPasteDataText("");
+                    }}
+                    className="px-4 py-2 border border-slate-300 text-slate-600 hover:bg-slate-150 rounded-lg text-xs font-bold cursor-pointer"
+                  >
+                    Fechar Painel
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Toast Notification */}
+        <AnimatePresence>
+          {toast && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 50 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="fixed bottom-6 right-6 z-[100] max-w-md w-full bg-white rounded-xl shadow-2xl border border-slate-200 p-4 flex gap-3 items-start animate-fade-in"
+            >
+              <div
+                className={`p-2 rounded-lg shrink-0 ${
+                  toast.type === "success"
+                    ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                    : toast.type === "error"
+                      ? "bg-rose-50 text-rose-800 border border-rose-200"
+                      : "bg-blue-50 text-blue-800 border border-blue-200"
+                }`}
+              >
+                {toast.type === "success" ? (
+                  <span className="text-base font-bold">✓</span>
+                ) : toast.type === "error" ? (
+                  <span className="text-base font-bold">⚠️</span>
+                ) : (
+                  <span className="text-base font-bold">ℹ️</span>
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-bold text-slate-805 text-slate-800 uppercase tracking-wide">
+                  {toast.type === "success"
+                    ? "Sucesso"
+                    : toast.type === "error"
+                      ? "Atenção"
+                      : "Mensagem do Sistema"}
+                </p>
+                <p className="text-xs text-slate-650 text-slate-600 mt-1 leading-relaxed font-sans font-medium whitespace-pre-line">
+                  {toast.message}
+                </p>
+              </div>
+
+              <button
+                onClick={() => setToast(null)}
+                className="text-slate-400 hover:text-slate-600 transition-colors p-1 -mt-1 cursor-pointer text-sm font-bold"
+              >
+                &times;
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Real-time Notifications */}
+        <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-3 pointer-events-none">
+          <AnimatePresence>
+            {notifications.map((notif) => (
+              <motion.div
+                key={notif.id}
+                initial={{ opacity: 0, y: 50, scale: 0.9 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, x: 100, scale: 0.9 }}
+                className="bg-white px-4 py-3 rounded-xl shadow-2xl border-l-4 border-indigo-500 flex items-center gap-4 w-72 pointer-events-auto"
+              >
+                <div className="h-10 w-10 bg-indigo-100 rounded-full flex items-center justify-center shrink-0">
+                  <Bell className="w-5 h-5 text-indigo-600" />
+                </div>
+                <div>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-0.5">
+                    Novo Processo!
+                  </p>
+                  <p className="text-sm font-bold text-slate-800 leading-tight">
+                    <span className="text-indigo-600">
+                      {notif.estagiarioName}
+                    </span>{" "}
+                    finalizou!
+                  </p>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                    <p className="text-xs text-slate-500 font-mono font-medium">
+                      Total hoje:{" "}
+                      <span className="font-bold text-slate-800">
+                        {notif.count}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+      </div>
+    </div>
+  );
+}

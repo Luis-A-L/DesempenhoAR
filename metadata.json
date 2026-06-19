@@ -1,0 +1,6 @@
+{
+  "name": "Estagiários Productivity Tracker",
+  "description": "A productivity tracking dashboard for the Estagiários de Recursos unit, allowing entries and future data management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
