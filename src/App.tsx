@@ -1509,7 +1509,7 @@ export default function App() {
     // Sincronização inicial (agora ignora autoSyncEnabled para sempre verificar acesso no boot)
     if (
       spreadsheetUrl &&
-      estagiarios.length > 0 &&
+      !loading &&
       !isAuthLoading &&
       !hasAutoSyncedOnStartup
     ) {
@@ -1518,7 +1518,7 @@ export default function App() {
     }
   }, [
     spreadsheetUrl,
-    estagiarios,
+    loading,
     isAuthLoading,
     hasAutoSyncedOnStartup,
   ]);
@@ -2164,9 +2164,138 @@ export default function App() {
     );
   }
 
+  // 1. Tela de Login Premium
+  if (!googleUser) {
+    return (
+      <div className="flex min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-indigo-950 text-white items-center justify-center font-sans relative p-4 overflow-hidden">
+        {/* Decorative Blurred Orbs */}
+        <div className="absolute top-[-10%] left-[-10%] w-[45vw] h-[45vw] rounded-full bg-indigo-600/10 blur-[120px] pointer-events-none animate-pulse duration-[6000ms]"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[45vw] h-[45vw] rounded-full bg-sky-600/10 blur-[120px] pointer-events-none animate-pulse duration-[8000ms]"></div>
 
+        <div className="w-full max-w-md bg-white/[0.03] backdrop-blur-xl border border-white/10 rounded-2xl p-8 sm:p-10 shadow-2xl flex flex-col items-center relative z-10 text-center">
+          <div className="w-16 h-16 bg-gradient-to-tr from-indigo-500 to-sky-400 rounded-2xl flex items-center justify-center font-black text-3xl tracking-tight shadow-lg shadow-indigo-500/20 mb-8 border border-white/10">
+            V
+          </div>
 
+          <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight mb-2">
+            Desempenho <span className="bg-gradient-to-r from-indigo-400 to-sky-400 bg-clip-text text-transparent">AR</span>
+          </h2>
+          <p className="text-xs font-semibold tracking-widest text-indigo-300 uppercase mb-8">
+            1ª Vice-Presidência TJPR
+          </p>
 
+          <p className="text-sm text-slate-400 mb-8 leading-relaxed">
+            Painel de controle e produtividade de estagiários de graduação e pós-graduação da Assessoria de Recursos.
+          </p>
+
+          <button
+            onClick={handleGoogleLogin}
+            disabled={isLoggingInGoogle}
+            className="w-full py-3.5 bg-white hover:bg-slate-100 text-slate-900 rounded-xl font-bold text-sm tracking-wide transition-all duration-300 flex items-center justify-center gap-3 cursor-pointer shadow-lg active:scale-[0.98] border border-white/10"
+          >
+            {isLoggingInGoogle ? (
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-indigo-600"></div>
+            ) : (
+              <svg
+                version="1.1"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 48 48"
+                className="w-5 h-5 block"
+              >
+                <path
+                  fill="#EA4335"
+                  d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                ></path>
+                <path
+                  fill="#4285F4"
+                  d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                ></path>
+                <path
+                  fill="#FBBC05"
+                  d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                ></path>
+                <path
+                  fill="#34A853"
+                  d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                ></path>
+              </svg>
+            )}
+            <span>{isLoggingInGoogle ? "CONECTANDO..." : "ENTRAR COM O GOOGLE"}</span>
+          </button>
+
+          <div className="mt-10 pt-6 border-t border-white/5 w-full">
+            <p className="text-[10px] text-slate-500 uppercase tracking-widest leading-relaxed">
+              Sistema Restrito • Atualizado em Tempo Real
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Tela de Verificação de Acesso (Carregamento da permissão da Planilha)
+  if (spreadsheetUrl && hasSpreadsheetAccess === null) {
+    return (
+      <div className="flex min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-indigo-950 text-white items-center justify-center font-sans relative p-4 overflow-hidden">
+        <div className="absolute top-[-10%] left-[-10%] w-[45vw] h-[45vw] rounded-full bg-indigo-600/10 blur-[120px] pointer-events-none"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[45vw] h-[45vw] rounded-full bg-sky-600/10 blur-[120px] pointer-events-none"></div>
+
+        <div className="w-full max-w-md bg-white/[0.03] backdrop-blur-xl border border-white/10 rounded-2xl p-8 sm:p-10 shadow-2xl flex flex-col items-center relative z-10 text-center">
+          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-400 mb-6"></div>
+          <h3 className="text-lg font-bold tracking-tight mb-2">Verificando Permissão de Acesso</h3>
+          <p className="text-xs text-slate-400 max-w-xs leading-relaxed mb-6">
+            Aguarde enquanto verificamos se a conta <span className="text-indigo-300 font-bold">{googleUser.email}</span> possui acesso à planilha vinculada do Google Sheets...
+          </p>
+          <button
+            onClick={handleGoogleLogout}
+            className="px-4 py-2 border border-white/10 text-white/60 hover:text-white rounded-lg text-xs font-bold hover:bg-white/5 transition-all cursor-pointer"
+          >
+            Cancelar e Sair
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Tela de Bloqueio por Falta de Acesso à Planilha
+  if (spreadsheetUrl && hasSpreadsheetAccess === false) {
+    return (
+      <div className="flex min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-red-950/40 text-white items-center justify-center font-sans relative p-4 overflow-hidden">
+        <div className="absolute top-[-10%] left-[-10%] w-[45vw] h-[45vw] rounded-full bg-red-900/10 blur-[120px] pointer-events-none"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[45vw] h-[45vw] rounded-full bg-indigo-900/10 blur-[120px] pointer-events-none"></div>
+
+        <div className="w-full max-w-md bg-white/[0.03] backdrop-blur-xl border border-red-500/20 rounded-2xl p-8 sm:p-10 shadow-2xl flex flex-col items-center relative z-10 text-center">
+          <div className="w-14 h-14 bg-red-500/10 text-red-400 rounded-2xl flex items-center justify-center mb-6 border border-red-500/20">
+            <Lock className="w-6 h-6 animate-bounce" />
+          </div>
+
+          <h3 className="text-xl font-bold tracking-tight text-red-300 mb-2">Acesso Negado à Planilha</h3>
+          <p className="text-sm text-slate-400 mb-6 leading-relaxed">
+            Sua conta Google <span className="text-red-200 font-bold">{googleUser.email}</span> não tem permissão para visualizar a planilha vinculada ao sistema.
+          </p>
+
+          <div className="bg-red-500/5 border border-red-500/10 rounded-lg p-3 text-left w-full text-xs text-red-200/80 mb-8 font-mono break-all leading-normal">
+            Planilha: {spreadsheetUrl}
+          </div>
+
+          <div className="flex flex-col gap-3 w-full">
+            <button
+              onClick={() => triggerSheetsSync(spreadsheetUrl, estagiarios, true)}
+              className="w-full py-3 bg-white/5 hover:bg-white/10 text-white rounded-xl font-bold text-xs tracking-wide transition-all border border-white/10 cursor-pointer"
+            >
+              TENTAR NOVAMENTE
+            </button>
+            <button
+              onClick={handleGoogleLogout}
+              className="w-full py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-xs tracking-wide transition-all cursor-pointer shadow-md"
+            >
+              ENTRAR COM OUTRA CONTA GOOGLE
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans selection:bg-slate-900 selection:text-white overflow-hidden">
