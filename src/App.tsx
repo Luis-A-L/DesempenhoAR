@@ -1910,6 +1910,11 @@ export default function App() {
     });
   }, [estagiarios, entries, selectedMonth, selectedDetailDate]);
 
+  // Total de processos do dia selecionado
+  const totalDayAnalyzed = useMemo(() => {
+    return parsedEstagiariosData.reduce((sum, est) => sum + est.detailAnalyzed, 0);
+  }, [parsedEstagiariosData]);
+
   // Global aggregate metrics
   const globalMetrics = useMemo(() => {
     const filteredEntries = entries.filter((e) =>
@@ -2813,7 +2818,7 @@ export default function App() {
 
                   {/* Detalhe do Dia Selecionado List */}
                   <div className="bg-white border text-center border-indigo-200 rounded-xl shadow-sm overflow-hidden mb-0">
-                    <div className="p-4 bg-indigo-50 border-b border-indigo-100 flex items-center justify-between">
+                    <div className="p-4 bg-indigo-50 border-b border-indigo-100 flex flex-col sm:flex-row items-center justify-between gap-3">
                       <h2 className="text-sm font-bold tracking-tight text-indigo-900 flex items-center gap-2">
                         <Zap className="w-4 h-4 text-emerald-500 animate-pulse" />
                         {selectedDetailDate === getCurrentDate() ? (
@@ -2823,20 +2828,42 @@ export default function App() {
                         )}
                       </h2>
                       <div className="flex items-center gap-2">
+                        {/* Indicador de Total Geral Acumulado no Dia */}
+                        <div className="flex items-center gap-1.5 bg-indigo-600 text-white px-2.5 py-1 rounded-lg text-[10px] font-extrabold shadow-sm select-none">
+                          <span>TOTAL DO DIA:</span>
+                          <span className="bg-white text-indigo-700 px-2 py-0.5 rounded font-black text-xs">
+                            {totalDayAnalyzed.toLocaleString("pt-BR")}
+                          </span>
+                        </div>
+
                         {selectedDetailDate !== getCurrentDate() && (
                           <button
                             onClick={() => setSelectedDetailDate(getCurrentDate())}
-                            className="text-[10px] bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-bold px-2 py-1 rounded-md transition-all cursor-pointer shadow-sm"
+                            className="text-[10px] bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-bold px-2 py-1 rounded-md transition-all cursor-pointer shadow-sm border border-indigo-200"
                           >
                             Voltar para Hoje
                           </button>
                         )}
-                        <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-1 rounded-full uppercase tracking-wider">
+                        <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-1 rounded-full uppercase tracking-wider select-none">
                           Visualização por Dia
                         </span>
                       </div>
                     </div>
                     <div className="p-4 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                      {/* Card Especial de Destaque com o Total da Equipe */}
+                      <div className="bg-gradient-to-br from-indigo-500 to-indigo-600 border border-indigo-600 rounded-lg p-3 flex flex-col items-center justify-center relative overflow-hidden shadow-sm select-none">
+                        <div className="absolute top-0 right-0 w-12 h-12 bg-white/10 rounded-full blur-xl -mr-3 -mt-3"></div>
+                        <span className="text-xs font-extrabold text-white text-center uppercase tracking-wider w-full">
+                          TOTAL EQUIPE
+                        </span>
+                        <span className="text-2xl font-black text-white mt-1">
+                          {totalDayAnalyzed.toLocaleString("pt-BR")}
+                        </span>
+                        <span className="text-[9px] text-indigo-100 font-bold mt-1 w-full text-center truncate">
+                          PROCESSOS CONCLUÍDOS
+                        </span>
+                      </div>
+
                       {parsedEstagiariosData
                         .slice()
                         .sort((a, b) => b.detailAnalyzed - a.detailAnalyzed)
