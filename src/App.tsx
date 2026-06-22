@@ -83,6 +83,17 @@ export default function App() {
   const [estagiarios, setEstagiarios] = useState<Estagiario[]>([]);
   const [entries, setEntries] = useState<ProductivityEntry[]>([]);
 
+  const estagiariosRef = React.useRef(estagiarios);
+  const entriesRef = React.useRef(entries);
+
+  useEffect(() => {
+    estagiariosRef.current = estagiarios;
+  }, [estagiarios]);
+
+  useEffect(() => {
+    entriesRef.current = entries;
+  }, [entries]);
+
   // Normalização de lançamentos com sufixos de origem (_cv, _rcv, etc.) para o dia 23/06/2026 em diante
   const normalizedEntries = useMemo(() => {
     const ORIGEM_MAP: Record<string, string> = {
@@ -1048,13 +1059,6 @@ export default function App() {
                   count: parsedVal,
                 });
               }
-            } else {
-              // Se a célula está vazia, nós assumimos produtividade zero
-              parsedEntries.push({
-                estagiarioId: finalEstagiarioId,
-                date: isoDate,
-                count: 0,
-              });
             }
           }
         });
@@ -1428,7 +1432,7 @@ export default function App() {
 
       // Otimização: Filtrar apenas os estagiários que sofreram alguma modificação cadastral ou novos cadastros
       const finalEstagiariosToUpsert = estagiariosToUpsert.filter((newEstag) => {
-        const existing = estagiarios.find((e) => e.id === newEstag.id);
+        const existing = estagiariosRef.current.find((e) => e.id === newEstag.id);
         if (!existing) return true; // Novo cadastro
         return (
           existing.name !== newEstag.name ||
@@ -1461,7 +1465,7 @@ export default function App() {
       // Otimização de gravação: Filtrar e reter somente as entradas cujas quantidades mudaram ou novas entradas
       const entriesToUpsert: Omit<ProductivityEntry, "id">[] = [];
       validEntries.forEach((entry) => {
-        const existing = entries.find(
+        const existing = entriesRef.current.find(
           (e) => e.estagiarioId === entry.estagiarioId && e.date === entry.date
         );
         if (!existing || existing.count !== entry.count) {
@@ -1472,17 +1476,27 @@ export default function App() {
       if (entriesToUpsert.length > 0) {
         await batchUpsertEntries(entriesToUpsert);
 
-        // 3. Recarregar entradas do banco apenas se de fato ocorreram modificações para poupar requisições
-        const entriesSnap = await getDocs(collection(db, "productivityEntries"));
-        const entriesList: ProductivityEntry[] = [];
-        const today = getCurrentDate();
-        entriesSnap.forEach((docSnap) => {
-          const data = docSnap.data() as ProductivityEntry;
-          if (data.date <= today) {
-            entriesList.push({ id: docSnap.id, ...data });
-          }
+        // Atualiza o estado local 'entries' diretamente com os novos valores que foram salvos
+        // Isso previne a race condition de sumir os dados da tela pois não faz getDocs total assíncrono concorrente com o realtime
+        setEntries((prev) => {
+          const next = [...prev];
+          entriesToUpsert.forEach((newEntry) => {
+            const idx = next.findIndex(
+              (e) => e.estagiarioId === newEntry.estagiarioId && e.date === newEntry.date
+            );
+            if (idx !== -1) {
+              // Mantém o ID original do banco para consistência
+              next[idx] = { ...next[idx], count: newEntry.count };
+            } else {
+              // Adiciona temporariamente sem ID (o Realtime Socket atualizará o ID definitivo do banco logo em seguida)
+              next.push({
+                id: `temp_${newEntry.estagiarioId}_${newEntry.date}`,
+                ...newEntry,
+              });
+            }
+          });
+          return next;
         });
-        setEntries(entriesList);
       }
 
       // 4. Salvar configurações da planilha
@@ -1543,17 +1557,32 @@ export default function App() {
 
     const unsubEntries = subscribeToEntries(
       (updated) => {
+        if (!updated || !updated.estagiarioId || !updated.date) return;
+
         setEntries((prev) => {
-          const idx = prev.findIndex((e) => e.id === updated.id);
+          // Busca por ID ou pela combinação de estagiarioId e date para evitar duplicados com registros provisórios locais
+          const idx = prev.findIndex(
+            (e) => e.id === updated.id || (e.estagiarioId === updated.estagiarioId && e.date === updated.date)
+          );
           if (idx !== -1) {
             const next = [...prev];
-            next[idx] = updated;
+            const existingCount = next[idx].count;
+            const safeCount = typeof updated.count === 'number' && !isNaN(updated.count)
+              ? updated.count
+              : (updated.count !== null && updated.count !== undefined && !isNaN(Number(updated.count)) ? Number(updated.count) : existingCount);
+            
+            next[idx] = { ...updated, count: safeCount };
             return next;
           }
-          return [...prev, updated];
+          const safeCount = typeof updated.count === 'number' && !isNaN(updated.count)
+            ? updated.count
+            : (updated.count !== null && updated.count !== undefined && !isNaN(Number(updated.count)) ? Number(updated.count) : 0);
+          
+          return [...prev, { ...updated, count: safeCount }];
         });
       },
       (deletedId) => {
+        if (!deletedId) return;
         setEntries((prev) => prev.filter((e) => e.id !== deletedId));
       }
     );
@@ -1574,7 +1603,7 @@ export default function App() {
       !hasAutoSyncedOnStartup
     ) {
       setHasAutoSyncedOnStartup(true);
-      triggerSheetsSync(spreadsheetUrl, estagiarios, false);
+      triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
     }
   }, [
     spreadsheetUrl,
@@ -1595,7 +1624,7 @@ export default function App() {
       !syncingSheets
     ) {
       interval = setInterval(() => {
-        triggerSheetsSync(spreadsheetUrl, estagiarios, false);
+        triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
       }, 60000);
     }
 
