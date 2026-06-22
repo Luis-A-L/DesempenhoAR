@@ -1207,6 +1207,19 @@ export default function App() {
       const isQuotaError = err.status === 429 || (err.message && err.message.toLowerCase().includes("quota"));
       if (err.status === 401 || err.status === 403) {
         setHasSpreadsheetAccess(false);
+        // Se for erro de sessão expirada / token inválido (401), tentamos reautenticar de forma automatizada
+        if (err.status === 401) {
+          const lastAutoAuthStr = sessionStorage.getItem("last_auto_reauth_time");
+          const now = Date.now();
+          const delay = 15000; // 15 segundos de cooldown
+          
+          if (!lastAutoAuthStr || now - parseInt(lastAutoAuthStr, 10) > delay) {
+            sessionStorage.setItem("last_auto_reauth_time", now.toString());
+            console.warn("Detectado token do Google expirado (401). Iniciando reautenticação automática...");
+            googleSignIn();
+            return;
+          }
+        }
       } else if (!isQuotaError && !hasSpreadsheetAccess && hasSpreadsheetAccess !== null) {
         // Leave it false if it was already false, but if it's 429, don't force it to false
         setHasSpreadsheetAccess(false);
