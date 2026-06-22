@@ -207,6 +207,7 @@ export default function App() {
   const [hasSpreadsheetAccess, setHasSpreadsheetAccess] = useState<
     boolean | null
   >(null);
+  const [selectedDetailDate, setSelectedDetailDate] = useState<string>(getCurrentDate());
 
   // Notifications
   const previousTodayCounts = React.useRef<Record<string, number>>({});
@@ -271,6 +272,16 @@ export default function App() {
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Update selectedDetailDate when selectedMonth changes
+  useEffect(() => {
+    const today = getCurrentDate();
+    if (today.startsWith(selectedMonth)) {
+      setSelectedDetailDate(today);
+    } else {
+      setSelectedDetailDate(`${selectedMonth}-01`);
+    }
+  }, [selectedMonth]);
 
   // Initialize edit fields when an estagiario is selected
   useEffect(() => {
@@ -1692,6 +1703,44 @@ export default function App() {
     }
   };
 
+  // Excluir cadastro de Estagiário
+  const handleDeleteEstagiario = async (estagiarioId: string) => {
+    const est = estagiarios.find((a) => a.id === estagiarioId);
+    if (!est) return;
+
+    if (
+      !window.confirm(
+        `Tem certeza que deseja excluir o cadastro do estagiário "${est.name}"? Isso removerá o cadastro dele permanentemente no sistema.`
+      )
+    )
+      return;
+
+    setIsSaving(true);
+    try {
+      // 1. Deletar estagiário do banco
+      await deleteDoc(doc(db, "estagiarios", estagiarioId));
+
+      // 2. Deletar todas as entries de produtividade deste estagiário
+      const estagiarioEntries = entries.filter((e) => e.estagiarioId === estagiarioId);
+      for (const entry of estagiarioEntries) {
+        await deleteDoc(doc(db, "productivityEntries", entry.id));
+      }
+
+      // 3. Atualizar o estado local
+      setEstagiarios((prev) => prev.filter((a) => a.id !== estagiarioId));
+      setEntries((prev) => prev.filter((item) => item.estagiarioId !== estagiarioId));
+
+      // Fechar modal de detalhe
+      setSelectedEstagiarioDetail(null);
+      alert(`Cadastro do estagiário "${est.name}" e seus respectivos históricos foram removidos.`);
+    } catch (err) {
+      console.error("Error deleting estagiario:", err);
+      alert("Erro ao excluir o cadastro do estagiário.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   // List of unique months that have at least one productivity entry
   const availableMonths = useMemo(() => {
     const monthsSet = new Set<string>();
@@ -1787,6 +1836,11 @@ export default function App() {
       );
       const todayAnalyzed = todayEntry ? todayEntry.count : 0;
 
+      const detailEntry = entries.find(
+        (e) => e.estagiarioId === estagiario.id && e.date === selectedDetailDate,
+      );
+      const detailAnalyzed = detailEntry ? detailEntry.count : 0;
+
       const role =
         estagiario.role === "pos_graduacao" ? "pos_graduacao" : "graduacao";
       const dailyGoal =
@@ -1819,6 +1873,7 @@ export default function App() {
             : 0,
         totalAnalyzed,
         todayAnalyzed,
+        detailAnalyzed,
         daysWorked,
         averagePerDay,
         status,
@@ -2600,6 +2655,14 @@ export default function App() {
                         <ResponsiveContainer width="100%" height="100%">
                           <ComposedChart
                             data={dailyTrendsData}
+                            style={{ cursor: "pointer" }}
+                            onClick={(state) => {
+                              if (state && state.activeTooltipIndex !== undefined && dailyTrendsData[state.activeTooltipIndex]) {
+                                const clickedData = dailyTrendsData[state.activeTooltipIndex];
+                                const formattedClickedDate = `${selectedMonth}-${clickedData.dia}`;
+                                setSelectedDetailDate(formattedClickedDate);
+                              }
+                            }}
                             margin={{
                               top: 10,
                               right: 10,
@@ -2720,31 +2783,45 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Feito Hoje List */}
+                  {/* Detalhe do Dia Selecionado List */}
                   <div className="bg-white border text-center border-indigo-200 rounded-xl shadow-sm overflow-hidden mb-0">
                     <div className="p-4 bg-indigo-50 border-b border-indigo-100 flex items-center justify-between">
                       <h2 className="text-sm font-bold tracking-tight text-indigo-900 flex items-center gap-2">
-                        <Zap className="w-4 h-4 text-emerald-500" />
-                        FEITO HOJE — TEMPO REAL
+                        <Zap className="w-4 h-4 text-emerald-500 animate-pulse" />
+                        {selectedDetailDate === getCurrentDate() ? (
+                          <span>FEITO HOJE — TEMPO REAL</span>
+                        ) : (
+                          <span>PRODUTIVIDADE EM {selectedDetailDate.split("-").reverse().join("/")}</span>
+                        )}
                       </h2>
-                      <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-1 rounded-full uppercase tracking-wider animate-pulse">
-                        Atualização Automática
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {selectedDetailDate !== getCurrentDate() && (
+                          <button
+                            onClick={() => setSelectedDetailDate(getCurrentDate())}
+                            className="text-[10px] bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-bold px-2 py-1 rounded-md transition-all cursor-pointer shadow-sm"
+                          >
+                            Voltar para Hoje
+                          </button>
+                        )}
+                        <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-1 rounded-full uppercase tracking-wider">
+                          Visualização por Dia
+                        </span>
+                      </div>
                     </div>
                     <div className="p-4 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
                       {parsedEstagiariosData
                         .slice()
-                        .sort((a, b) => b.todayAnalyzed - a.todayAnalyzed)
+                        .sort((a, b) => b.detailAnalyzed - a.detailAnalyzed)
                         .map((est) => (
                           <div
                             key={est.id}
                             className="bg-slate-50 hover:bg-white border border-slate-200 hover:border-indigo-300 transition-all rounded-lg p-3 flex flex-col items-center justify-center relative overflow-hidden group shadow-sm hover:shadow-md"
                           >
-                            {est.todayAnalyzed >= est.dailyGoal && (
+                            {est.detailAnalyzed >= est.dailyGoal && (
                               <div className="absolute top-0 inset-x-0 h-1 bg-emerald-500"></div>
                             )}
-                            {est.todayAnalyzed > 0 &&
-                              est.todayAnalyzed < est.dailyGoal && (
+                            {est.detailAnalyzed > 0 &&
+                              est.detailAnalyzed < est.dailyGoal && (
                                 <div className="absolute top-0 inset-x-0 h-1 bg-indigo-400"></div>
                               )}
                             <span
@@ -2754,9 +2831,9 @@ export default function App() {
                               {est.name}
                             </span>
                             <span
-                              className={`text-2xl font-light mt-1 ${est.todayAnalyzed > 0 ? "text-indigo-600" : "text-slate-300"}`}
+                              className={`text-2xl font-light mt-1 ${est.detailAnalyzed > 0 ? "text-indigo-600" : "text-slate-300"}`}
                             >
-                              {est.todayAnalyzed}
+                              {est.detailAnalyzed}
                             </span>
                             <span className="text-[9px] text-slate-400 font-mono mt-1 w-full text-center truncate">
                               META: {est.dailyGoal}
@@ -3765,6 +3842,13 @@ export default function App() {
                                 title="Editar cadastro do estagiário"
                               >
                                 <Edit3 className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteEstagiario(detailedEstagiario.id)}
+                                className="p-1 text-slate-400 hover:text-red-400 transition-colors cursor-pointer ml-1"
+                                title="Excluir estagiário da equipe"
+                              >
+                                <Trash2 className="w-4 h-4" />
                               </button>
                             </div>
                             <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-1 flex flex-wrap items-center gap-1.5">
