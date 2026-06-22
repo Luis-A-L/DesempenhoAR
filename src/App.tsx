@@ -476,7 +476,7 @@ export default function App() {
       ) {
         estagiariosSheetContent = content;
         estagiariosSheetName = name;
-      } else if (norm.includes("controle")) {
+      } else if (norm === "controle") {
         // Apenas a aba de Controle
         controleSheets.push({ name, content });
       }
