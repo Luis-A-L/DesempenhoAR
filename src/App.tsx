@@ -113,6 +113,7 @@ export default function App() {
     }> = {};
 
     entries.forEach((e) => {
+      if (!e || !e.estagiarioId || !e.date) return;
       let realEstagiarioId = e.estagiarioId;
       let origemKey: string | null = null;
 
@@ -417,16 +418,12 @@ export default function App() {
       // 2. Carregar entradas de produtividade
       const entriesSnap = await getDocs(collection(db, "productivityEntries"));
       const entriesList: ProductivityEntry[] = [];
-      const today = getCurrentDate();
-
       entriesSnap.forEach((docSnap) => {
         const data = {
           id: docSnap.id,
           ...docSnap.data(),
         } as ProductivityEntry;
-        if (data.date <= today) {
-          entriesList.push(data);
-        }
+        entriesList.push(data);
       });
       setEntries(entriesList);
 
@@ -831,7 +828,7 @@ export default function App() {
 
         const rawDate = row[dateColIdx] || "";
         const isoDate = parseDateToISO(rawDate);
-        if (!isoDate || isoDate < "2026-04-01" || isoDate > getCurrentDate()) continue;
+        if (!isoDate || isoDate < "2026-04-01") continue;
 
         const rawProc = procColIdx !== -1 && procColIdx < row.length ? row[procColIdx].trim() : "";
         const rawOrigem = origemColIdx !== -1 && origemColIdx < row.length ? row[origemColIdx].trim() : "";
@@ -943,11 +940,7 @@ export default function App() {
             const row = rows[r];
             const rawDate = row[dateColIdx] || "";
             const isoDate = parseDateToISO(rawDate);
-            if (
-              !isoDate ||
-              isoDate < "2026-04-01" ||
-              isoDate > getCurrentDate()
-            )
+            if (!isoDate || isoDate < "2026-04-01")
               continue;
 
             // Fim de semana não pode contabilizar (Domingo=0, Sabado=6)
@@ -1170,7 +1163,7 @@ export default function App() {
         if (dateColIdx >= row.length) return;
         const rawDate = row[dateColIdx];
         const isoDate = parseDateToISO(rawDate);
-        if (!isoDate || isoDate < "2026-04-01" || isoDate > getCurrentDate())
+        if (!isoDate || isoDate < "2026-04-01")
           return;
 
         const rawOrigem = origemColIdx !== -1 && origemColIdx < row.length ? row[origemColIdx].trim() : "";
