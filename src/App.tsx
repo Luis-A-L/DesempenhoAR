@@ -20,7 +20,6 @@ import {
   batchUpsertEstagiarios,
   batchUpsertEntries,
   subscribeToEstagiarios,
-  subscribeToEntries,
 } from "./lib/stubs";
 import { fetchSheetDataDirectly } from "./lib/supabase";
 import { Estagiario, ProductivityEntry, INITIAL_ESTAGIARIOS } from "./lib/types";
@@ -1555,41 +1554,8 @@ export default function App() {
       }
     );
 
-    const unsubEntries = subscribeToEntries(
-      (updated) => {
-        if (!updated || !updated.estagiarioId || !updated.date) return;
-
-        setEntries((prev) => {
-          // Busca por ID ou pela combinação de estagiarioId e date para evitar duplicados com registros provisórios locais
-          const idx = prev.findIndex(
-            (e) => e.id === updated.id || (e.estagiarioId === updated.estagiarioId && e.date === updated.date)
-          );
-          if (idx !== -1) {
-            const next = [...prev];
-            const existingCount = next[idx].count;
-            const safeCount = typeof updated.count === 'number' && !isNaN(updated.count)
-              ? updated.count
-              : (updated.count !== null && updated.count !== undefined && !isNaN(Number(updated.count)) ? Number(updated.count) : existingCount);
-            
-            next[idx] = { ...updated, count: safeCount };
-            return next;
-          }
-          const safeCount = typeof updated.count === 'number' && !isNaN(updated.count)
-            ? updated.count
-            : (updated.count !== null && updated.count !== undefined && !isNaN(Number(updated.count)) ? Number(updated.count) : 0);
-          
-          return [...prev, { ...updated, count: safeCount }];
-        });
-      },
-      (deletedId) => {
-        if (!deletedId) return;
-        setEntries((prev) => prev.filter((e) => e.id !== deletedId));
-      }
-    );
-
     return () => {
       unsubEstag();
-      unsubEntries();
     };
   }, []);
 
