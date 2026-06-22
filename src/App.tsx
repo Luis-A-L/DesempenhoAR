@@ -1330,12 +1330,24 @@ export default function App() {
         }
       }
 
-      if (estagiariosToUpsert.length > 0) {
-        await batchUpsertEstagiarios(estagiariosToUpsert);
+      // Otimização: Filtrar apenas os estagiários que sofreram alguma modificação cadastral ou novos cadastros
+      const finalEstagiariosToUpsert = estagiariosToUpsert.filter((newEstag) => {
+        const existing = estagiarios.find((e) => e.id === newEstag.id);
+        if (!existing) return true; // Novo cadastro
+        return (
+          existing.name !== newEstag.name ||
+          existing.role !== newEstag.role ||
+          existing.dailyGoal !== newEstag.dailyGoal ||
+          existing.matricula !== newEstag.matricula
+        );
+      });
+
+      if (finalEstagiariosToUpsert.length > 0) {
+        await batchUpsertEstagiarios(finalEstagiariosToUpsert);
         // Atualiza estado local
         setEstagiarios((prev) => {
           const next = [...prev];
-          estagiariosToUpsert.forEach((e) => {
+          finalEstagiariosToUpsert.forEach((e) => {
             const idx = next.findIndex((x) => x.id === e.id);
             if (idx !== -1) {
               next[idx] = { ...next[idx], ...e };
@@ -1349,21 +1361,33 @@ export default function App() {
 
       // 2. Upsert entradas de produtividade em massa
       const validEntries = entriesToSave.filter((e) => e && e.estagiarioId && e.date);
-      if (validEntries.length > 0) {
-        await batchUpsertEntries(validEntries);
-      }
-
-      // 3. Recarregar entradas do banco para garantir consistência
-      const entriesSnap = await getDocs(collection(db, "productivityEntries"));
-      const entriesList: ProductivityEntry[] = [];
-      const today = getCurrentDate();
-      entriesSnap.forEach((docSnap) => {
-        const data = docSnap.data() as ProductivityEntry;
-        if (data.date <= today) {
-          entriesList.push({ id: docSnap.id, ...data });
+      
+      // Otimização de gravação: Filtrar e reter somente as entradas cujas quantidades mudaram ou novas entradas
+      const entriesToUpsert: Omit<ProductivityEntry, "id">[] = [];
+      validEntries.forEach((entry) => {
+        const existing = entries.find(
+          (e) => e.estagiarioId === entry.estagiarioId && e.date === entry.date
+        );
+        if (!existing || existing.count !== entry.count) {
+          entriesToUpsert.push(entry);
         }
       });
-      setEntries(entriesList);
+
+      if (entriesToUpsert.length > 0) {
+        await batchUpsertEntries(entriesToUpsert);
+
+        // 3. Recarregar entradas do banco apenas se de fato ocorreram modificações para poupar requisições
+        const entriesSnap = await getDocs(collection(db, "productivityEntries"));
+        const entriesList: ProductivityEntry[] = [];
+        const today = getCurrentDate();
+        entriesSnap.forEach((docSnap) => {
+          const data = docSnap.data() as ProductivityEntry;
+          if (data.date <= today) {
+            entriesList.push({ id: docSnap.id, ...data });
+          }
+        });
+        setEntries(entriesList);
+      }
 
       // 4. Salvar configurações da planilha
       const nowIso = new Date().toISOString();
@@ -1463,7 +1487,7 @@ export default function App() {
     hasAutoSyncedOnStartup,
   ]);
 
-  // Polling para "tempo real" a cada 10 segundos
+  // Polling para "tempo real" a cada 60 segundos (diminuído consumo de requisições)
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
 
@@ -1476,7 +1500,7 @@ export default function App() {
     ) {
       interval = setInterval(() => {
         triggerSheetsSync(spreadsheetUrl, estagiarios, false);
-      }, 10000);
+      }, 60000);
     }
 
     return () => {
