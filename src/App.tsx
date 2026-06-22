@@ -1085,8 +1085,17 @@ export default function App() {
       setSheetSyncError("");
 
       // Salva automaticamente no Firestore em qualquer sincronização
+      // Se for sincronização periódica de background (sem feedback visual), salva apenas o mês atual para evitar sobrecarga e re-gravar histórico estático
+      let finalEntriesToSave = parseResult.entries;
+      if (!showFeedback) {
+        const currentM = getCurrentMonth();
+        finalEntriesToSave = parseResult.entries.filter(
+          (e) => e.date && e.date.startsWith(currentM)
+        );
+      }
+
       await saveSyncedDataToFirestore(
-        parseResult.entries,
+        finalEntriesToSave,
         parseResult.estagiariosCreated,
         urlStr,
         !showFeedback,
@@ -1369,25 +1378,7 @@ export default function App() {
       );
       setLastSyncTime(nowIso);
 
-      // Auto-set the active view to the newly imported/synced month
-      if (entriesToSave.length > 0) {
-        const monthCounts: Record<string, number> = {};
-        entriesToSave.forEach((e) => {
-          if (e.date && e.date.length >= 7) {
-            const m = e.date.substring(0, 7);
-            monthCounts[m] = (monthCounts[m] || 0) + 1;
-          }
-        });
-        let bestMonth = selectedMonth;
-        let maxCount = 0;
-        Object.entries(monthCounts).forEach(([m, count]) => {
-          if (count > maxCount) {
-            maxCount = count;
-            bestMonth = m;
-          }
-        });
-        setSelectedMonth(bestMonth);
-      }
+      // O mês selecionado não é mais alterado automaticamente no final da sincronização para respeitar a navegação do usuário e manter o mês atual selecionado.
 
       if (!isStartupSilent) {
         alert(
@@ -1880,7 +1871,7 @@ export default function App() {
         entriesList: filteredEntries,
       };
     });
-  }, [estagiarios, entries, selectedMonth]);
+  }, [estagiarios, entries, selectedMonth, selectedDetailDate]);
 
   // Global aggregate metrics
   const globalMetrics = useMemo(() => {
