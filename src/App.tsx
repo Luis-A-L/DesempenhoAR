@@ -124,7 +124,7 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
 
   // Navigation / Tabs
-  const [activeTab, setActiveTab] = useState<"dashboard" | "matrix">(
+  const [activeTab, setActiveTab] = useState<"dashboard" | "matrix" | "desempenho" | "diario">(
     "dashboard",
   );
   const [teamSortConfig, setTeamSortConfig] = useState<{
@@ -200,6 +200,15 @@ export default function App() {
   const [detailTab, setDetailTab] = useState<"month" | "day">("month");
   const [detailedProcesses, setDetailedProcesses] = useState<Record<string, { origem: string; date: string; timestamp: string }>>({});
   const [loadingProcesses, setLoadingProcesses] = useState<boolean>(false);
+
+  // Redistribuição de processos
+  const [isRedistributeOpen, setIsRedistributeOpen] = useState<boolean>(false);
+  const [redistributeFromId, setRedistributeFromId] = useState<string>("");
+  const [redistributeDate, setRedistributeDate] = useState<string>(getCurrentDate());
+  const [redistributeCount, setRedistributeCount] = useState<number>(0);
+
+  // Processos detalhados agregados de toda a equipe no mês
+  const [allDetailedProcesses, setAllDetailedProcesses] = useState<Record<string, Record<string, { origem: string; date: string }>>>({});
 
   // Toast notification state and safe non-blocking iframe-friendly alert shadowing
   const [toast, setToast] = useState<{
@@ -1925,6 +1934,28 @@ export default function App() {
     setDetailTab("month"); // Sempre abre na aba mensal por padrao
   }, [selectedEstagiarioDetail, selectedMonth]);
 
+  // Carregar processos detalhados de todos os estagiários para o mês selecionado (usado no gráfico de rosça)
+  useEffect(() => {
+    const fetchAllDetailedProcesses = async () => {
+      if (estagiarios.length === 0) return;
+      const result: Record<string, Record<string, { origem: string; date: string }>> = {};
+      const promises = estagiarios.map(async (est) => {
+        try {
+          const key = `proc_time_${est.id}_${selectedMonth}`;
+          const snap = await getDoc(doc(db, "settings", key));
+          if (snap.exists()) {
+            result[est.id] = snap.data() || {};
+          }
+        } catch (err) {
+          console.error(`Erro ao buscar processos detalhados de ${est.id}:`, err);
+        }
+      });
+      await Promise.all(promises);
+      setAllDetailedProcesses(result);
+    };
+    fetchAllDetailedProcesses();
+  }, [estagiarios, selectedMonth]);
+
   // Sincronização automática dinâmica ao iniciar o aplicativo e contínua:
   useEffect(() => {
     // Sincronização inicial (agora ignora autoSyncEnabled para sempre verificar acesso no boot)
@@ -2218,6 +2249,128 @@ export default function App() {
     } catch (err) {
       console.error("Error deleting estagiario:", err);
       alert("Erro ao excluir o cadastro do estagiário.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Função para redistribuir processos de um estagiário para outro
+  const handleRedistribute = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedEstagiarioDetail || !redistributeFromId) {
+      alert("Por favor, selecione o estagiário de origem.");
+      return;
+    }
+    if (selectedEstagiarioDetail === redistributeFromId) {
+      alert("Não é possível redistribuir processos para a mesma pessoa.");
+      return;
+    }
+    if (redistributeCount <= 0) {
+      alert("A quantidade de processos a redistribuir deve ser maior que 0.");
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      // 1. Obter registros de produtividade do estagiário de origem
+      const { data: fromEntries, error: err1 } = await supabase
+        .from("productivity_entries")
+        .select("*")
+        .eq("estagiario_id", redistributeFromId)
+        .eq("date", redistributeDate);
+
+      if (err1) throw err1;
+
+      const fromEntry = fromEntries && fromEntries[0];
+      const fromCount = fromEntry ? fromEntry.count : 0;
+
+      if (fromCount < redistributeCount) {
+        throw new Error(
+          `O estagiário de origem possui apenas ${fromCount} processos registrados em ${redistributeDate.split("-").reverse().join("/")}.`
+        );
+      }
+
+      // 2. Obter registros de produtividade do estagiário destino (atual)
+      const { data: toEntries, error: err2 } = await supabase
+        .from("productivity_entries")
+        .select("*")
+        .eq("estagiario_id", selectedEstagiarioDetail)
+        .eq("date", redistributeDate);
+
+      if (err2) throw err2;
+
+      const toEntry = toEntries && toEntries[0];
+      const toCount = toEntry ? toEntry.count : 0;
+
+      // 3. Atualizar estagiário origem
+      const updatedFromCount = fromCount - redistributeCount;
+      if (updatedFromCount === 0 && fromEntry) {
+        // Excluir registro se zerou
+        const { error: delErr } = await supabase
+          .from("productivity_entries")
+          .delete()
+          .eq("id", fromEntry.id);
+        if (delErr) throw delErr;
+      } else if (fromEntry) {
+        const { error: updErr } = await supabase
+          .from("productivity_entries")
+          .update({ count: updatedFromCount })
+          .eq("id", fromEntry.id);
+        if (updErr) throw updErr;
+      }
+
+      // 4. Atualizar estagiário destino
+      const updatedToCount = toCount + redistributeCount;
+      const payloadTo = {
+        estagiario_id: selectedEstagiarioDetail,
+        date: redistributeDate,
+        count: updatedToCount,
+      };
+
+      if (toEntry) {
+        const { error: updErr } = await supabase
+          .from("productivity_entries")
+          .update({ count: updatedToCount })
+          .eq("id", toEntry.id);
+        if (updErr) throw updErr;
+      } else {
+        const { error: insErr } = await supabase
+          .from("productivity_entries")
+          .insert([payloadTo]);
+        if (insErr) throw insErr;
+      }
+
+      // 5. Atualizar estado local
+      setEntries((prev) => {
+        // Remover ou atualizar o registro de origem
+        let next = prev.filter((x) => !(x.estagiarioId === redistributeFromId && x.date === redistributeDate));
+        if (updatedFromCount > 0) {
+          next.push({
+            id: fromEntry?.id || `${redistributeFromId}_${redistributeDate}`,
+            estagiarioId: redistributeFromId,
+            date: redistributeDate,
+            count: updatedFromCount,
+          });
+        }
+        
+        // Atualizar ou inserir o registro de destino
+        next = next.filter((x) => !(x.estagiarioId === selectedEstagiarioDetail && x.date === redistributeDate));
+        next.push({
+          id: toEntry?.id || `${selectedEstagiarioDetail}_${redistributeDate}`,
+          estagiarioId: selectedEstagiarioDetail,
+          date: redistributeDate,
+          count: updatedToCount,
+        });
+        return next;
+      });
+
+      alert("Processos redistribuídos com sucesso!");
+      setIsRedistributeOpen(false);
+      setRedistributeCount(0);
+      setRedistributeFromId("");
+    } catch (err: any) {
+      console.error("Erro ao redistribuir processos:", err);
+      alert("Erro ao redistribuir processos: " + (err.message || err));
     } finally {
       setIsSaving(false);
     }
@@ -2529,30 +2682,49 @@ export default function App() {
     });
   }, [normalizedEntries, selectedMonth]);
 
-  // Distribution by Estagiario Role (Recharts)
+  // Distribution by Process Type — carrega dos processos detalhados salvos nas settings
   const distributionChartData = useMemo(() => {
-    const sumByRole: Record<string, number> = {
-      pos_graduacao: 0,
-      graduacao: 0,
-      pos: 0,
+    // Tipos de processo e suas cores premium
+    const PROCESS_TYPES: Record<string, { label: string; fill: string }> = {
+      CV:  { label: "CV",  fill: "#2563eb" }, // blue-600 (cível)
+      RCV: { label: "RCV", fill: "#3b82f6" }, // blue-500
+      DCV: { label: "DCV", fill: "#60a5fa" }, // blue-400
+      CR:  { label: "CR",  fill: "#dc2626" }, // red-600 (crime)
+      RCR: { label: "RCR", fill: "#ef4444" }, // red-500
+      DCR: { label: "DCR", fill: "#f87171" }, // red-400
     };
-    parsedEstagiariosData.forEach((e) => {
-      if (sumByRole[e.role] !== undefined) {
-        sumByRole[e.role] += e.totalAnalyzed || 0;
-      } else {
-        sumByRole.pos += e.totalAnalyzed || 0; // fallback
-      }
+
+    const counts: Record<string, number> = {};
+    Object.keys(PROCESS_TYPES).forEach(t => { counts[t] = 0; });
+
+    // Agrega de allDetailedProcesses para o mês selecionado
+    Object.values(allDetailedProcesses).forEach(procMap => {
+      Object.values(procMap).forEach((proc: any) => {
+        if (proc.date && proc.date.startsWith(selectedMonth) && proc.origem) {
+          const tipo = (proc.origem as string).toUpperCase();
+          if (counts[tipo] !== undefined) counts[tipo] += 1;
+        }
+      });
     });
-    return [
-      {
-        name: "Pós-Graduação",
-        value: sumByRole.pos_graduacao || 0,
-        fill: "#4f46e5",
-      }, // indigo-600
-      { name: "Graduação", value: sumByRole.graduacao || 0, fill: "#0ea5e9" }, // sky-500
-      { name: "Outros/Geral", value: sumByRole.pos || 0, fill: "#10b981" }, // emerald-500
-    ].filter((x) => x.value > 0);
-  }, [parsedEstagiariosData]);
+
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+
+    // Se não há processos detalhados, fallback para distribuição por categoria
+    if (total === 0) {
+      const sumByRole: Record<string, number> = { pos_graduacao: 0, graduacao: 0 };
+      parsedEstagiariosData.forEach((e) => {
+        if (sumByRole[e.role] !== undefined) sumByRole[e.role] += e.totalAnalyzed || 0;
+      });
+      return [
+        { name: "Pós-Graduação", value: sumByRole.pos_graduacao || 0, fill: "#4f46e5" },
+        { name: "Graduação",     value: sumByRole.graduacao || 0,     fill: "#0ea5e9" },
+      ].filter((x) => x.value > 0);
+    }
+
+    return Object.entries(PROCESS_TYPES)
+      .map(([key, meta]) => ({ name: meta.label, value: counts[key] || 0, fill: meta.fill }))
+      .filter((x) => x.value > 0);
+  }, [parsedEstagiariosData, allDetailedProcesses, selectedMonth]);
 
   // List of all active month entries sorted chronologically (newest first)
   const chronologicalEntries = useMemo(() => {
@@ -2747,7 +2919,7 @@ export default function App() {
           V
         </div>
 
-        <nav className="flex flex-col gap-6 flex-1 w-full items-center">
+        <nav className="flex flex-col gap-4 flex-1 w-full items-center">
           <button
             onClick={() => setActiveTab("dashboard")}
             className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
@@ -2758,6 +2930,28 @@ export default function App() {
             title="Dashboard"
           >
             <BarChart2 className="w-5 h-5" />
+          </button>
+          <button
+            onClick={() => setActiveTab("desempenho")}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+              activeTab === "desempenho"
+                ? "bg-amber-500/20 text-amber-400"
+                : "hover:text-slate-200 hover:bg-slate-800"
+            }`}
+            title="Desempenho da Equipe"
+          >
+            <Award className="w-5 h-5" />
+          </button>
+          <button
+            onClick={() => setActiveTab("diario")}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+              activeTab === "diario"
+                ? "bg-sky-500/20 text-sky-400"
+                : "hover:text-slate-200 hover:bg-slate-800"
+            }`}
+            title="Diário de Lançamentos"
+          >
+            <Clock className="w-5 h-5" />
           </button>
           <button
             onClick={() => setActiveTab("matrix")}
@@ -2945,28 +3139,50 @@ export default function App() {
             {/* Controls Bar */}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
               <div className="flex items-center gap-3">
-                <div className="flex bg-slate-100 p-1 rounded-lg">
+                <div className="flex bg-slate-100 p-1 rounded-lg gap-0.5">
                   <button
                     onClick={() => setActiveTab("dashboard")}
-                    className={`px-4 py-2 rounded-md text-xs font-bold tracking-wide transition-all flex items-center gap-2 ${
+                    className={`px-3 py-2 rounded-md text-xs font-bold tracking-wide transition-all flex items-center gap-1.5 ${
                       activeTab === "dashboard"
                         ? "bg-white text-slate-900 shadow-sm"
                         : "text-slate-500 hover:text-slate-900"
                     }`}
                   >
-                    <List className="w-4 h-4" />
+                    <BarChart2 className="w-3.5 h-3.5" />
                     DASHBOARD
                   </button>
                   <button
+                    onClick={() => setActiveTab("desempenho")}
+                    className={`px-3 py-2 rounded-md text-xs font-bold tracking-wide transition-all flex items-center gap-1.5 ${
+                      activeTab === "desempenho"
+                        ? "bg-white text-amber-700 shadow-sm"
+                        : "text-slate-500 hover:text-slate-900"
+                    }`}
+                  >
+                    <Award className="w-3.5 h-3.5" />
+                    DESEMPENHO
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("diario")}
+                    className={`px-3 py-2 rounded-md text-xs font-bold tracking-wide transition-all flex items-center gap-1.5 ${
+                      activeTab === "diario"
+                        ? "bg-white text-sky-700 shadow-sm"
+                        : "text-slate-500 hover:text-slate-900"
+                    }`}
+                  >
+                    <Clock className="w-3.5 h-3.5" />
+                    DIÁRIO
+                  </button>
+                  <button
                     onClick={() => setActiveTab("matrix")}
-                    className={`px-4 py-2 rounded-md text-xs font-bold tracking-wide transition-all flex items-center gap-2 ${
+                    className={`px-3 py-2 rounded-md text-xs font-bold tracking-wide transition-all flex items-center gap-1.5 ${
                       activeTab === "matrix"
                         ? "bg-white text-slate-900 shadow-sm"
                         : "text-slate-500 hover:text-slate-900"
                     }`}
                   >
-                    <Grid className="w-4 h-4" />
-                    MATRIZ (PLANILHA)
+                    <Grid className="w-3.5 h-3.5" />
+                    MATRIZ
                   </button>
                 </div>
 
@@ -3325,7 +3541,11 @@ export default function App() {
                           return (
                             <div
                               key={est.id}
-                              className="bg-white border border-slate-200 hover:border-indigo-300 transition-all rounded-xl flex flex-col relative overflow-hidden shadow-sm hover:shadow-md"
+                              onClick={() => {
+                                setSelectedEstagiarioDetail(est.id);
+                                setRedistributeDate(selectedDetailDate);
+                              }}
+                              className="bg-white border border-slate-200 hover:border-indigo-400 transition-all rounded-xl flex flex-col relative overflow-hidden shadow-sm hover:shadow-md cursor-pointer group"
                             >
                               {/* Faixa de cor no topo */}
                               {est.detailAnalyzed >= est.dailyGoal ? (
@@ -3341,7 +3561,7 @@ export default function App() {
                               <div className="p-3 flex flex-col flex-1">
                                 {/* Nome */}
                                 <span
-                                  className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider truncate w-full text-center"
+                                  className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider truncate w-full text-center group-hover:text-indigo-600 transition-colors"
                                   title={est.name}
                                 >
                                   {est.name}
@@ -3370,6 +3590,11 @@ export default function App() {
                                     META: {est.dailyGoal}
                                   </span>
                                 )}
+
+                                {/* Indicador de clicável */}
+                                <div className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-center">
+                                  <span className="text-[8px] text-indigo-400 font-bold uppercase tracking-wider">Ver detalhes</span>
+                                </div>
                               </div>
                             </div>
                           );
@@ -3377,6 +3602,16 @@ export default function App() {
                     </div>
                   </div>
 
+                </motion.div>
+              ) : activeTab === "desempenho" ? (
+                /* Aba Desempenho da Equipe */
+                <motion.div
+                  key="desempenho-view"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="flex flex-col gap-6"
+                >
                   {/* Performance Row */}
                   <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
                     {/* Left Column (Team Performance List) */}
@@ -3384,13 +3619,12 @@ export default function App() {
                       <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
                         <div>
                           <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
-                            <Award className="w-4 h-4 text-slate-500" />
+                            <Award className="w-4 h-4 text-amber-500" />
                             DESEMPENHO DA EQUIPE —{" "}
                             {selectedMonth.split("-").reverse().join("/")}
                           </h2>
                           <p className="text-[11px] text-slate-400 mt-0.5">
-                            Classificação dinâmica baseada em processos
-                            concluídos
+                            Classificação dinâmica baseada em processos concluídos
                           </p>
                         </div>
                       </div>
@@ -3399,85 +3633,37 @@ export default function App() {
                         <table className="w-full text-left border-collapse">
                           <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-400 font-bold tracking-widest uppercase cursor-pointer select-none">
                             <tr>
-                              <th
-                                className="px-6 py-3.5 group"
-                                onClick={() => handleTeamSort("name")}
-                              >
-                                <div className="flex items-center gap-1">
-                                  Estagiário {renderSortIcon("name")}
-                                </div>
+                              <th className="px-6 py-3.5 group" onClick={() => handleTeamSort("name")}>
+                                <div className="flex items-center gap-1">Estagiário {renderSortIcon("name")}</div>
                               </th>
-                              <th
-                                className="px-4 py-3.5 text-center group"
-                                onClick={() => handleTeamSort("role")}
-                              >
-                                <div className="flex items-center justify-center gap-1">
-                                  Categoria / Meta {renderSortIcon("role")}
-                                </div>
+                              <th className="px-4 py-3.5 text-center group" onClick={() => handleTeamSort("role")}>
+                                <div className="flex items-center justify-center gap-1">Categoria / Meta {renderSortIcon("role")}</div>
                               </th>
-                              <th
-                                className="px-4 py-3.5 text-center group"
-                                onClick={() => handleTeamSort("todayAnalyzed")}
-                              >
-                                <div className="flex items-center justify-center gap-1">
-                                  Feito Hoje {renderSortIcon("todayAnalyzed")}
-                                </div>
+                              <th className="px-4 py-3.5 text-center group" onClick={() => handleTeamSort("todayAnalyzed")}>
+                                <div className="flex items-center justify-center gap-1">Feito Hoje {renderSortIcon("todayAnalyzed")}</div>
                               </th>
-                              <th
-                                className="px-4 py-3.5 text-center group"
-                                onClick={() => handleTeamSort("totalAnalyzed")}
-                              >
-                                <div className="flex items-center justify-center gap-1">
-                                  Acumulado Mês{" "}
-                                  {renderSortIcon("totalAnalyzed")}
-                                </div>
+                              <th className="px-4 py-3.5 text-center group" onClick={() => handleTeamSort("totalAnalyzed")}>
+                                <div className="flex items-center justify-center gap-1">Acumulado Mês {renderSortIcon("totalAnalyzed")}</div>
                               </th>
-                              <th
-                                className="px-4 py-3.5 text-center group"
-                                onClick={() => handleTeamSort("daysWorked")}
-                              >
-                                <div className="flex items-center justify-center gap-1">
-                                  Dias Ativos {renderSortIcon("daysWorked")}
-                                </div>
+                              <th className="px-4 py-3.5 text-center group" onClick={() => handleTeamSort("daysWorked")}>
+                                <div className="flex items-center justify-center gap-1">Dias Ativos {renderSortIcon("daysWorked")}</div>
                               </th>
-                              <th
-                                className="px-4 py-3.5 text-center font-mono group"
-                                onClick={() => handleTeamSort("averagePerDay")}
-                              >
-                                <div className="flex items-center justify-center gap-1">
-                                  Média/Dia {renderSortIcon("averagePerDay")}
-                                </div>
+                              <th className="px-4 py-3.5 text-center font-mono group" onClick={() => handleTeamSort("averagePerDay")}>
+                                <div className="flex items-center justify-center gap-1">Média/Dia {renderSortIcon("averagePerDay")}</div>
                               </th>
-                              <th
-                                className="px-4 py-3.5 text-center group"
-                                onClick={() =>
-                                  handleTeamSort("goalProgressRatio")
-                                }
-                              >
-                                <div className="flex items-center justify-center gap-1">
-                                  Aproveitamento{" "}
-                                  {renderSortIcon("goalProgressRatio")}
-                                </div>
+                              <th className="px-4 py-3.5 text-center group" onClick={() => handleTeamSort("goalProgressRatio")}>
+                                <div className="flex items-center justify-center gap-1">Aproveitamento {renderSortIcon("goalProgressRatio")}</div>
                               </th>
-                              <th
-                                className="px-6 py-3.5 text-right group"
-                                onClick={() => handleTeamSort("status")}
-                              >
-                                <div className="flex items-center justify-end gap-1">
-                                  Status {renderSortIcon("status")}
-                                </div>
+                              <th className="px-6 py-3.5 text-right group" onClick={() => handleTeamSort("status")}>
+                                <div className="flex items-center justify-end gap-1">Status {renderSortIcon("status")}</div>
                               </th>
                             </tr>
                           </thead>
                           <tbody className="text-sm divide-y divide-slate-100">
                             {filteredEstagiariosData.length === 0 ? (
                               <tr>
-                                <td
-                                  colSpan={8}
-                                  className="px-6 py-10 text-center text-slate-400 font-medium"
-                                >
-                                  Nenhum estagiário encontrado com os filtros
-                                  atuais.
+                                <td colSpan={8} className="px-6 py-10 text-center text-slate-400 font-medium">
+                                  Nenhum estagiário encontrado com os filtros atuais.
                                 </td>
                               </tr>
                             ) : (
@@ -3485,9 +3671,7 @@ export default function App() {
                                 return (
                                   <tr
                                     key={item.id}
-                                    onClick={() =>
-                                      setSelectedEstagiarioDetail(item.id)
-                                    }
+                                    onClick={() => setSelectedEstagiarioDetail(item.id)}
                                     className="hover:bg-slate-50 cursor-pointer transition-colors"
                                   >
                                     <td className="px-6 py-4 font-semibold text-slate-800 flex items-center gap-2.5">
@@ -3497,65 +3681,42 @@ export default function App() {
                                       {item.name}
                                     </td>
                                     <td className="px-4 py-4 text-center">
-                                      <span
-                                        className={`px-2 py-0.5 text-[9px] font-bold rounded ${
-                                          item.role === "pos_graduacao"
-                                            ? "bg-slate-200 text-slate-850 border border-slate-300"
-                                            : "bg-slate-100 text-slate-600 border border-slate-150"
-                                        }`}
-                                      >
-                                        {item.role === "pos_graduacao"
-                                          ? "Pós-Graduação"
-                                          : "Graduação"}
+                                      <span className={`px-2 py-0.5 text-[9px] font-bold rounded ${
+                                        item.role === "pos_graduacao"
+                                          ? "bg-slate-200 text-slate-850 border border-slate-300"
+                                          : "bg-slate-100 text-slate-600 border border-slate-150"
+                                      }`}>
+                                        {item.role === "pos_graduacao" ? "Pós-Graduação" : "Graduação"}
                                       </span>
-                                      <span className="block text-[9px] text-slate-400 font-bold font-mono mt-1">
-                                        {item.dailyGoal}/dia
-                                      </span>
+                                      <span className="block text-[9px] text-slate-400 font-bold font-mono mt-1">{item.dailyGoal}/dia</span>
                                     </td>
                                     <td className="px-4 py-4 text-center">
-                                      <span className="font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-md text-xs border border-indigo-100">
-                                        {item.todayAnalyzed}
-                                      </span>
+                                      <span className="font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-md text-xs border border-indigo-100">{item.todayAnalyzed}</span>
                                     </td>
-                                    <td className="px-4 py-4 text-center text-slate-800 font-bold">
-                                      {item.totalAnalyzed}
-                                    </td>
-                                    <td className="px-4 py-4 text-center text-slate-500">
-                                      {item.daysWorked} dias
-                                    </td>
+                                    <td className="px-4 py-4 text-center text-slate-800 font-bold">{item.totalAnalyzed}</td>
+                                    <td className="px-4 py-4 text-center text-slate-500">{item.daysWorked} dias</td>
                                     <td className="px-4 py-4 text-center font-mono text-slate-600">
-                                      {item.averagePerDay > 0
-                                        ? item.averagePerDay
-                                        : "—"}
+                                      {item.averagePerDay > 0 ? item.averagePerDay : "—"}
                                     </td>
                                     <td className="px-4 py-4 text-center">
-                                      <div className="flex flex-col items-center justify-center">
-                                        <span
-                                          className={`font-mono text-xs font-bold ${
-                                            item.goalProgressRatio >= 100
-                                              ? "text-emerald-600"
-                                              : item.goalProgressRatio >= 80
-                                                ? "text-amber-600"
-                                                : "text-red-900"
-                                          }`}
-                                        >
-                                          {item.goalProgressRatio}%
-                                        </span>
-                                        <span className="text-[9px] text-slate-400 mt-0.5">
-                                          {item.daysMeetingGoal} d. batidos
-                                        </span>
+                                      <div className="flex items-center justify-center gap-1.5">
+                                        <div className="h-1.5 w-16 bg-slate-100 rounded-full overflow-hidden">
+                                          <div className={`h-full rounded-full transition-all ${
+                                            item.goalProgressRatio >= 100 ? "bg-emerald-500" :
+                                            item.goalProgressRatio >= 70 ? "bg-amber-400" : "bg-red-500"
+                                          }`} style={{ width: `${Math.min(item.goalProgressRatio, 100)}%` }}></div>
+                                        </div>
+                                        <span className="font-mono text-[10px] text-slate-600 font-bold">{item.goalProgressRatio}%</span>
                                       </div>
                                     </td>
                                     <td className="px-6 py-4 text-right">
-                                      <span
-                                        className={`px-2.5 py-0.5 text-[10px] font-bold rounded-full ${
-                                          item.status === "ALTO"
-                                            ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                            : item.status === "NORMAL"
-                                              ? "bg-amber-50 text-amber-700 border border-amber-200"
-                                              : "bg-red-950 text-red-200 border border-red-800"
-                                        }`}
-                                      >
+                                      <span className={`px-2.5 py-0.5 text-[10px] font-bold rounded-full ${
+                                        item.status === "ALTO"
+                                          ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                          : item.status === "NORMAL"
+                                            ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                            : "bg-red-950 text-red-200 border border-red-800"
+                                      }`}>
                                         {item.status}
                                       </span>
                                     </td>
@@ -3570,12 +3731,9 @@ export default function App() {
 
                     {/* Sidebar Info Panels */}
                     <div className="flex flex-col gap-6">
-                      {/* unit progress card */}
                       <div className="bg-slate-900 text-white rounded-xl p-5 shadow-sm relative overflow-hidden flex-1 flex flex-col justify-between">
                         <div className="relative z-10">
-                          <h3 className="text-[10px] font-bold text-slate-400 tracking-widest uppercase mb-4">
-                            Categorias Estimadas
-                          </h3>
+                          <h3 className="text-[10px] font-bold text-slate-400 tracking-widest uppercase mb-4">Categorias Estimadas</h3>
                           <div className="space-y-4">
                             {categorySplit.map((cat) => (
                               <div key={cat.name}>
@@ -3584,37 +3742,25 @@ export default function App() {
                                   <span>{cat.pct}%</span>
                                 </div>
                                 <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
-                                  <div
-                                    className={`h-full rounded-full ${cat.color}`}
-                                    style={{ width: `${cat.pct}%` }}
-                                  ></div>
+                                  <div className={`h-full rounded-full ${cat.color}`} style={{ width: `${cat.pct}%` }}></div>
                                 </div>
                               </div>
                             ))}
                           </div>
                         </div>
-
-                        {/* Decorator */}
                         <div className="absolute -bottom-8 -right-8 w-32 h-32 border-4 border-white/5 rounded-full z-0"></div>
                       </div>
 
-                      {/* Guidelines explanation info */}
                       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
                         <h3 className="text-[10px] text-slate-400 font-bold tracking-widest uppercase mb-3 flex items-center gap-1.5">
                           <HelpCircle className="w-4 h-4 text-slate-400" />
                           Prazo e Suporte
                         </h3>
                         <p className="text-xs text-slate-600 leading-relaxed mb-4">
-                          Selecione um estagiário na tabela para visualizar o
-                          histórico diário detalhado e editar lançamentos
-                          retroativos.
+                          Selecione um estagiário na tabela para visualizar o histórico diário detalhado, editar lançamentos retroativos ou redistribuir processos.
                         </p>
                         <button
-                          onClick={() => {
-                            alert(
-                              "Tabela de produtividade baseada nos dados do arquivo de referência da 1ª Vice-Presidência.",
-                            );
-                          }}
+                          onClick={() => alert("Tabela de produtividade baseada nos dados do arquivo de referência da 1ª Vice-Presidência.")}
                           className="w-full py-2 bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200 text-[10px] font-bold rounded transition-all cursor-pointer"
                         >
                           AJUDA E REGULAMENTO
@@ -3622,29 +3768,30 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-
-                  {/* Diário de Lançamentos - Chronological Diary Section */}
-                  <div
-                    id="diario-de-lancamentos"
-                    className="bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-hidden"
-                  >
+                </motion.div>
+              ) : activeTab === "diario" ? (
+                /* Aba Diário de Lançamentos */
+                <motion.div
+                  key="diario-view"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="flex flex-col gap-6"
+                >
+                  <div id="diario-de-lancamentos" className="bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-hidden">
                     <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row justify-between sm:items-center gap-3 bg-slate-50/50">
                       <div>
                         <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
-                          <Clock className="w-4 h-4 text-slate-500" />
+                          <Clock className="w-4 h-4 text-sky-500" />
                           DIÁRIO DE LANÇAMENTOS — HISTÓRICO{" "}
                           {selectedMonth.split("-").reverse().join("/")}
                         </h2>
                         <p className="text-[11px] text-slate-400 mt-0.5">
-                          Visão corrida e diária de todas as produtividades
-                          inseridas no mês de referência
+                          Visão corrida e diária de todas as produtividades inseridas no mês de referência
                         </p>
                       </div>
                       <div className="flex items-center gap-2 font-mono text-[10px] bg-slate-100 border border-slate-200 px-3 py-1 rounded text-slate-600">
-                        <span>
-                          STATUS: {filteredChronologicalEntries.length} DIAS COM
-                          LANÇAMENTOS
-                        </span>
+                        <span>STATUS: {filteredChronologicalEntries.length} DIAS COM LANÇAMENTOS</span>
                       </div>
                     </div>
 
@@ -3653,49 +3800,28 @@ export default function App() {
                         <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-400 font-bold tracking-widest uppercase">
                           <tr>
                             <th className="px-6 py-3.5">Data do Caso</th>
-                            <th className="px-6 py-3.5">
-                              Estagiário Responsável
-                            </th>
-                            <th className="px-6 py-3.5 text-center">
-                              Processos Concluídos (Produtividade)
-                            </th>
-                            <th className="px-6 py-3.5 text-right">
-                              Ações Rápidas
-                            </th>
+                            <th className="px-6 py-3.5">Estagiário Responsável</th>
+                            <th className="px-6 py-3.5 text-center">Processos Concluídos</th>
+                            <th className="px-6 py-3.5 text-right">Ações Rápidas</th>
                           </tr>
                         </thead>
                         <tbody className="text-sm divide-y divide-slate-100">
                           {paginatedEntries.length === 0 ? (
                             <tr>
-                              <td
-                                colSpan={4}
-                                className="px-6 py-12 text-center text-slate-400 font-medium"
-                              >
-                                Nenhum lançamento foi cadastrado neste mês sob
-                                os filtros aplicados. Insira dados usando o
-                                botão "+ Novo Lançamento" acima para alimentar o
-                                diário de produção.
+                              <td colSpan={4} className="px-6 py-12 text-center text-slate-400 font-medium">
+                                Nenhum lançamento foi cadastrado neste mês sob os filtros aplicados.
                               </td>
                             </tr>
                           ) : (
                             paginatedEntries.map((entry) => {
-                              const associatedEstagiario = estagiarios.find(
-                                (a) => a.id === entry.estagiarioId,
-                              );
-                              const name = associatedEstagiario
-                                ? associatedEstagiario.name
-                                : entry.estagiarioId;
+                              const associatedEstagiario = estagiarios.find((a) => a.id === entry.estagiarioId);
+                              const name = associatedEstagiario ? associatedEstagiario.name : entry.estagiarioId;
                               return (
-                                <tr
-                                  key={entry.id}
-                                  className="hover:bg-slate-50 transition-colors"
-                                >
+                                <tr key={entry.id} className="hover:bg-slate-50 transition-colors">
                                   <td className="px-6 py-4 font-mono font-semibold text-slate-600">
                                     {entry.date.split("-").reverse().join("/")}
                                   </td>
-                                  <td className="px-6 py-4 font-bold text-slate-800">
-                                    {name}
-                                  </td>
+                                  <td className="px-6 py-4 font-bold text-slate-800">{name}</td>
                                   <td className="px-6 py-4 text-center">
                                     <span className="font-mono text-xs font-extrabold text-slate-900 bg-slate-100/80 px-3 py-1 rounded border border-slate-200/50">
                                       {entry.count} concluídos
@@ -3705,9 +3831,7 @@ export default function App() {
                                     <div className="flex justify-end gap-2">
                                       <button
                                         onClick={() => {
-                                          setFormEstagiarioId(
-                                            entry.estagiarioId,
-                                          );
+                                          setFormEstagiarioId(entry.estagiarioId);
                                           setFormDate(entry.date);
                                           setFormCount(entry.count);
                                           setFormEditingId(entry.id);
@@ -3719,9 +3843,7 @@ export default function App() {
                                         <span>Editar</span>
                                       </button>
                                       <button
-                                        onClick={() =>
-                                          handleDeleteEntry(entry.id)
-                                        }
+                                        onClick={() => handleDeleteEntry(entry.id)}
                                         className="p-1 px-2 border border-rose-100 text-rose-500 hover:text-rose-700 rounded text-xs font-semibold flex items-center gap-1.5 hover:bg-rose-50 transition-all cursor-pointer"
                                       >
                                         <Trash2 className="w-3 h-3 text-rose-400" />
@@ -3736,35 +3858,23 @@ export default function App() {
                         </tbody>
                       </table>
                     </div>
-                    {/* Pagination Controls */}
                     {totalHistoryPages > 1 && (
                       <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 bg-slate-50/50">
                         <span className="text-[11px] text-slate-500 font-bold uppercase tracking-widest">
-                          Página {historyPage} de {totalHistoryPages} (
-                          {filteredChronologicalEntries.length} Itens)
+                          Página {historyPage} de {totalHistoryPages} ({filteredChronologicalEntries.length} Itens)
                         </span>
                         <div className="flex bg-white rounded-lg border border-slate-200 p-0.5 shadow-sm overflow-hidden text-sm">
                           <button
-                            onClick={() =>
-                              setHistoryPage((p) => Math.max(1, p - 1))
-                            }
+                            onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
                             disabled={historyPage === 1}
                             className="px-3 py-1.5 font-bold text-slate-600 disabled:opacity-30 hover:bg-slate-50 cursor-pointer disabled:cursor-not-allowed transition-all"
-                          >
-                            Anterior
-                          </button>
+                          >Anterior</button>
                           <div className="w-px bg-slate-200"></div>
                           <button
-                            onClick={() =>
-                              setHistoryPage((p) =>
-                                Math.min(totalHistoryPages, p + 1),
-                              )
-                            }
+                            onClick={() => setHistoryPage((p) => Math.min(totalHistoryPages, p + 1))}
                             disabled={historyPage === totalHistoryPages}
                             className="px-3 py-1.5 font-bold text-slate-600 disabled:opacity-30 hover:bg-slate-50 cursor-pointer disabled:cursor-not-allowed transition-all"
-                          >
-                            Próxima
-                          </button>
+                          >Próxima</button>
                         </div>
                       </div>
                     )}
@@ -4658,6 +4768,59 @@ export default function App() {
                             })()}
                           </>
                         )}
+
+                        {/* Seção de Redistribuição de Processos */}
+                        <div className="mt-4 border-t border-slate-100 pt-4">
+                          {!isRedistributeOpen ? (
+                            <button
+                              onClick={() => { setIsRedistributeOpen(true); setRedistributeFromId(""); setRedistributeCount(0); }}
+                              className="w-full py-2.5 px-4 bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer"
+                            >
+                              <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
+                              REDISTRIBUIR PROCESSOS PARA {detailedEstagiario.name.toUpperCase()}
+                            </button>
+                          ) : (
+                            <form onSubmit={handleRedistribute} className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+                              <div className="flex items-center justify-between mb-1">
+                                <h5 className="text-xs font-bold text-amber-900 uppercase tracking-wide flex items-center gap-1.5">
+                                  <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
+                                  Redistribuir para {detailedEstagiario.name}
+                                </h5>
+                                <button type="button" onClick={() => setIsRedistributeOpen(false)} className="text-amber-400 hover:text-amber-800 cursor-pointer">
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </div>
+                              <div>
+                                <label className="block text-[10px] uppercase font-bold text-amber-700 tracking-wider mb-1">Tirar processos de:</label>
+                                <select required value={redistributeFromId} onChange={(e) => setRedistributeFromId(e.target.value)} className="w-full px-3 py-2 bg-white border border-amber-200 rounded-lg text-xs font-bold text-slate-800 outline-none focus:border-amber-400 cursor-pointer">
+                                  <option value="">— Selecione o estagiário —</option>
+                                  {estagiarios.filter((e) => e.id !== selectedEstagiarioDetail).map((e) => (
+                                    <option key={e.id} value={e.id}>{e.name}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="block text-[10px] uppercase font-bold text-amber-700 tracking-wider mb-1">Data</label>
+                                  <input type="date" required value={redistributeDate} onChange={(e) => setRedistributeDate(e.target.value)} className="w-full px-2 py-1.5 bg-white border border-amber-200 rounded-lg text-xs font-mono outline-none focus:border-amber-400 text-slate-800" />
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] uppercase font-bold text-amber-700 tracking-wider mb-1">Qtd. Processos</label>
+                                  <input type="number" required min={1} value={redistributeCount || ""} onChange={(e) => setRedistributeCount(Math.max(0, Number(e.target.value)))} placeholder="Ex: 5" className="w-full px-2 py-1.5 bg-white border border-amber-200 rounded-lg text-xs font-mono outline-none focus:border-amber-400 text-slate-800" />
+                                </div>
+                              </div>
+                              {redistributeFromId && redistributeCount > 0 && (
+                                <div className="bg-white border border-amber-200 rounded-lg px-3 py-2 text-[10px] text-amber-800">
+                                  <span className="font-bold">Resumo:</span> Transferir <span className="font-black text-amber-900">{redistributeCount}</span> processo(s) de <span className="font-black">{estagiarios.find(e => e.id === redistributeFromId)?.name}</span> para <span className="font-black">{detailedEstagiario.name}</span> em <span className="font-mono font-bold">{redistributeDate.split("-").reverse().join("/")}</span>
+                                </div>
+                              )}
+                              <button type="submit" disabled={isSaving || !redistributeFromId || redistributeCount <= 0} className="w-full py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2">
+                                {isSaving ? <div className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                {isSaving ? "REDISTRIBUINDO..." : "CONFIRMAR REDISTRIBUIÇÃO"}
+                              </button>
+                            </form>
+                          )}
+                        </div>
                       </div>
                     </>
                   );
