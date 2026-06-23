@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
+import fs from "fs";
 
 // Safe non-blocking fetch with timeout to prevent Google Sheets from hanging the server
 const fetchWithTimeout = async (url: string, options: any = {}, timeoutMs = 25000) => {
@@ -228,6 +229,14 @@ async function startServer() {
           const defaultCsvText = sheetsResultMap[primarySheetName] || "";
 
           logSheetsData(sheetsResultMap);
+
+          try {
+            fs.writeFileSync("last_sync_debug.json", JSON.stringify(sheetsResultMap, null, 2));
+            console.log("[DEBUG] Dados reais salvos em last_sync_debug.json");
+          } catch (writeErr) {
+            console.error("[DEBUG] Erro ao salvar dados no disco:", writeErr);
+          }
+
 
           return res.json({ 
             success: true, 

@@ -461,6 +461,16 @@ export default function App() {
     rawData: string | { [key: string]: string },
     currentEstagiarios: Estagiario[],
   ) => {
+    let diagDetalhado = false;
+    let diagTypesRowIdx = -1;
+    let diagDateColIdx = -1;
+    let diagMaxDateCount = 0;
+    let diagTotalRows = 0;
+    let diagMappedUsers: string[] = [];
+    let diagFirstRowDump = "";
+    let diagFirstDateRaw = "";
+    let diagFirstDateIso = "";
+
     const normalizeText = (text: string) =>
       text
         .toLowerCase()
@@ -903,6 +913,9 @@ export default function App() {
       if (typesRowIdx !== -1) {
         // === FORMATO DETALHADO (subcolunas por tipo) ===
         console.log(`[parseSheetData] Formato DETALHADO detectado na aba "${cName}", linha de tipos: ${typesRowIdx}`);
+        diagDetalhado = true;
+        diagTypesRowIdx = typesRowIdx;
+        diagTotalRows = rows.length;
 
         // A linha de nomes de usuários é a anterior à linha de tipos
         const namesRowIdx = typesRowIdx - 1;
@@ -974,6 +987,15 @@ export default function App() {
         }
 
         console.log(`[parseSheetData] Usuários detectados no formato detalhado:`, Object.keys(userColsMap));
+        diagDateColIdx = dateColIdx;
+        diagMaxDateCount = maxDateCount;
+        diagMappedUsers = Object.keys(userColsMap);
+
+        if (rows[typesRowIdx + 1]) {
+          diagFirstRowDump = rows[typesRowIdx + 1].slice(0, 10).join(" | ");
+          diagFirstDateRaw = rows[typesRowIdx + 1][dateColIdx] || "";
+          diagFirstDateIso = parseDateToISO(diagFirstDateRaw) || "null";
+        }
 
         // Processar linhas de dados (a partir da linha após a de tipos)
         for (let r = typesRowIdx + 1; r < rows.length; r++) {
@@ -1359,7 +1381,9 @@ export default function App() {
     );
 
     let msg = "";
-    if (estagiariosSheetContent && controleSheets.length > 0) {
+    if (consolidatedEntries.length === 0 && diagDetalhado) {
+      msg = `Sincronizados 0 casos. Diag: typesRowIdx=${diagTypesRowIdx}, dateColIdx=${diagDateColIdx} (${diagMaxDateCount} datas), totalLinhas=${diagTotalRows}, usuarios=[${diagMappedUsers.join(", ")}], primeiraLinhaDump=[${diagFirstRowDump}], primeiraDataRaw="${diagFirstDateRaw}", primeiraDataIso="${diagFirstDateIso}"`;
+    } else if (estagiariosSheetContent && controleSheets.length > 0) {
       const namesList = controleSheets.map((s) => `"${s.name}"`).join(", ");
       msg = `Sincronização concluída! Foram sincronizados ${consolidatedEntries.length} casos de produtividade ao todo a partir de ${controleSheets.length} aba(s) (${namesList}) e localizados ${estagiariosFromSheet.length} perfis de estagiários na aba "${estagiariosSheetName}".`;
     } else if (controleSheets.length > 0) {
