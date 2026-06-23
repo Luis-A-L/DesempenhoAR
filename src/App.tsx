@@ -1472,15 +1472,18 @@ export default function App() {
       setSheetsMessage(parseResult.message);
       setSheetSyncError("");
 
-      // Salva automaticamente no Firestore apenas os dados do dia atual
-      // A sincronização incremental por dia evita sobrescrita de dados históricos e reduz requisições
-      const todayStr = getCurrentDate();
-      let finalEntriesToSave = parseResult.entries.filter(
-        (e) => e.date === todayStr
-      );
-      let finalDetailedProcesses = (parseResult.detailedProcesses || []).filter(
-        (p) => p.date === todayStr
-      );
+      // Salva no Firestore — sincronização manual salva tudo, automática salva só o dia atual
+      let finalEntriesToSave = parseResult.entries;
+      let finalDetailedProcesses = parseResult.detailedProcesses || [];
+      if (!showFeedback) {
+        const todayStr = getCurrentDate();
+        finalEntriesToSave = parseResult.entries.filter(
+          (e) => e.date === todayStr
+        );
+        finalDetailedProcesses = (parseResult.detailedProcesses || []).filter(
+          (p) => p.date === todayStr
+        );
+      }
 
       await saveSyncedDataToFirestore(
         finalEntriesToSave,
