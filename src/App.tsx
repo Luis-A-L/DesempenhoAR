@@ -1715,43 +1715,61 @@ export default function App() {
   ) => {
     setIsSaving(true);
     try {
-      // Gravar timestamps dos processos detalhados nas abas individuais se existirem
-      if (detailedProcesses && detailedProcesses.length > 0) {
-        const processesBySettingsKey: Record<string, typeof detailedProcesses> = {};
-        detailedProcesses.forEach((proc) => {
-          const monthKey = proc.date.substring(0, 7); // "2026-06"
-          const key = `proc_time_${proc.estagiarioId}_${monthKey}`;
-          if (!processesBySettingsKey[key]) {
-            processesBySettingsKey[key] = [];
-          }
-          processesBySettingsKey[key].push(proc);
-        });
-
-        for (const [key, procs] of Object.entries(processesBySettingsKey)) {
-          try {
-            const snap = await getDoc(doc(db, "settings", key));
-            const existingData: Record<string, { origem: string; date: string; timestamp: string }> = snap.exists() ? snap.data() || {} : {};
-            let hasChanges = false;
-
-            procs.forEach((p) => {
-              if (!existingData[p.numeroProcesso]) {
-                existingData[p.numeroProcesso] = {
-                  origem: p.origem,
-                  date: p.date,
-                  timestamp: new Date().toISOString(),
-                };
-                hasChanges = true;
-              }
-            });
-
-            if (hasChanges || !snap.exists()) {
-              await setDoc(doc(db, "settings", key), existingData);
+        // Gravar timestamps dos processos detalhados nas abas individuais se existirem
+        if (detailedProcesses && detailedProcesses.length > 0) {
+          const processesBySettingsKey: Record<string, typeof detailedProcesses> = {};
+          detailedProcesses.forEach((proc) => {
+            const monthKey = proc.date.substring(0, 7); // "2026-06"
+            const key = `proc_time_${proc.estagiarioId}_${monthKey}`;
+            if (!processesBySettingsKey[key]) {
+              processesBySettingsKey[key] = [];
             }
-          } catch (procErr) {
-            console.error(`Erro ao salvar processos para chave ${key}:`, procErr);
+            processesBySettingsKey[key].push(proc);
+          });
+
+          for (const [key, procs] of Object.entries(processesBySettingsKey)) {
+            try {
+              // Sincronização manual (!isStartupSilent) substitui os dados existentes
+              // Sincronização automática (isStartupSilent) só adiciona novos
+              if (!isStartupSilent) {
+                // Substitui completamente — garante que os dados do sheet sejam refletidos fielmente
+                const freshData: Record<string, { origem: string; date: string; timestamp: string }> = {};
+                procs.forEach((p) => {
+                  if (!freshData[p.numeroProcesso]) {
+                    freshData[p.numeroProcesso] = {
+                      origem: p.origem,
+                      date: p.date,
+                      timestamp: new Date().toISOString(),
+                    };
+                  }
+                });
+                await setDoc(doc(db, "settings", key), freshData);
+              } else {
+                // Apenas adiciona entradas novas (não sobrescreve dados históricos)
+                const snap = await getDoc(doc(db, "settings", key));
+                const existingData: Record<string, { origem: string; date: string; timestamp: string }> = snap.exists() ? snap.data() || {} : {};
+                let hasChanges = false;
+
+                procs.forEach((p) => {
+                  if (!existingData[p.numeroProcesso]) {
+                    existingData[p.numeroProcesso] = {
+                      origem: p.origem,
+                      date: p.date,
+                      timestamp: new Date().toISOString(),
+                    };
+                    hasChanges = true;
+                  }
+                });
+
+                if (hasChanges || !snap.exists()) {
+                  await setDoc(doc(db, "settings", key), existingData);
+                }
+              }
+            } catch (procErr) {
+              console.error(`Erro ao salvar processos para chave ${key}:`, procErr);
+            }
           }
         }
-      }
       // 1. Upsert estagiários (usar lista detalhada se disponível, fallback para lista de nomes)
       let estagiariosToUpsert: Estagiario[] = [];
 
@@ -3599,23 +3617,17 @@ export default function App() {
                                   const procs = allDetailedProcesses[est.id];
                                   if (!procs) return null;
                                   const dayProcs = Object.values(procs).filter((p: any) => p.date === selectedDetailDate);
-                                  if (dayProcs.length === 0 && est.detailAnalyzed === 0) return null;
+                                  if (dayProcs.length === 0) return null;
                                   const byOrigem: Record<string, number> = {};
                                   dayProcs.forEach((p: any) => {
                                     const o = p.origem || 'Sem origem';
                                     byOrigem[o] = (byOrigem[o] || 0) + 1;
                                   });
-                                  const sumDetalhado = Object.values(byOrigem).reduce((a, b) => a + b, 0);
-                                  const diff = est.detailAnalyzed - sumDetalhado;
-                                  if (diff > 0) {
-                                    byOrigem['Outros'] = diff;
-                                  }
                                   const ORIGEM_COLORS: Record<string, string> = {
                                     CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa',
                                     CR: '#dc2626', RCR: '#ef4444', DCR: '#f87171',
-                                    Outros: '#94a3b8',
                                   };
-                                  const order = ['CV','RCV','DCV','CR','RCR','DCR','Outros'];
+                                  const order = ['CV','RCV','DCV','CR','RCR','DCR'];
                                   const sorted = Object.entries(byOrigem).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
                                   return (
                                     <div className="flex flex-wrap gap-1 justify-center mt-1.5">
