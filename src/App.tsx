@@ -3594,6 +3594,38 @@ export default function App() {
                                   </span>
                                 )}
 
+                                {/* Process type breakdown for this day */}
+                                {(() => {
+                                  const procs = allDetailedProcesses[est.id];
+                                  if (!procs) return null;
+                                  const dayProcs = Object.values(procs).filter((p: any) => p.date === selectedDetailDate);
+                                  if (dayProcs.length === 0) return null;
+                                  const byOrigem: Record<string, number> = {};
+                                  dayProcs.forEach((p: any) => {
+                                    const o = p.origem || 'Sem origem';
+                                    byOrigem[o] = (byOrigem[o] || 0) + 1;
+                                  });
+                                  const ORIGEM_COLORS: Record<string, string> = {
+                                    CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa',
+                                    CR: '#dc2626', RCR: '#ef4444', DCR: '#f87171',
+                                  };
+                                  const order = ['CV','RCV','DCV','CR','RCR','DCR'];
+                                  const sorted = Object.entries(byOrigem).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
+                                  return (
+                                    <div className="flex flex-wrap gap-1 justify-center mt-1.5">
+                                      {sorted.map(([origem, count]) => (
+                                        <span
+                                          key={origem}
+                                          className="text-[9px] font-bold px-1.5 py-0.5 rounded"
+                                          style={{ backgroundColor: (ORIGEM_COLORS[origem] || '#94a3b8') + '20', color: ORIGEM_COLORS[origem] || '#94a3b8' }}
+                                        >
+                                          {origem}:{count}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  );
+                                })()}
+
                                 {/* Indicador de clicável */}
                                 <div className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-center">
                                   <span className="text-[8px] text-indigo-400 font-bold uppercase tracking-wider">Ver detalhes</span>
