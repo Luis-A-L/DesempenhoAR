@@ -31,6 +31,19 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // API Route: debug save sheets
+  app.post("/api/debug-save-sheets", (req, res) => {
+    try {
+      fs.writeFileSync("last_sync_debug.json", JSON.stringify(req.body.sheets, null, 2));
+      console.log("[DEBUG] Dados reais das abas salvos com sucesso em last_sync_debug.json");
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error("[DEBUG] Erro ao salvar dados no disco:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+
   // API Route: CORS proxy to dynamically sync Google Sheet
   app.post("/api/sync-sheet", async (req, res) => {
     const { url, token } = req.body;

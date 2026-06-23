@@ -5063,8 +5063,8 @@ export default function App() {
                       )}
 
                       <div className="space-y-2.5">
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                          <div className="sm:col-span-2">
+                        <div className="flex flex-col gap-3">
+                          <div>
                             <label className="block text-[9px] uppercase font-bold text-emerald-800 tracking-wider mb-1">
                               Link do Google Planilhas
                             </label>
@@ -5074,18 +5074,6 @@ export default function App() {
                               value={spreadsheetUrl}
                               onChange={(e) => setSpreadsheetUrl(e.target.value)}
                               className="w-full px-3 py-2 bg-white border border-slate-350 rounded-lg text-xs outline-none focus:border-emerald-500 font-mono shadow-3xs"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[9px] uppercase font-bold text-emerald-800 tracking-wider mb-1">
-                              Nome da Aba (Aba Alvo)
-                            </label>
-                            <input
-                              type="text"
-                              placeholder="Ex: Controle detalhado"
-                              value={selectedSheetName}
-                              onChange={(e) => setSelectedSheetName(e.target.value)}
-                              className="w-full px-3 py-2 bg-white border border-slate-350 rounded-lg text-xs outline-none focus:border-emerald-500 font-sans font-bold text-slate-700 shadow-3xs"
                             />
                           </div>
                         </div>
