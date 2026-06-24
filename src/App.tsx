@@ -2739,9 +2739,9 @@ export default function App() {
       CV:  { label: "CV",  fill: "#2563eb" }, // blue-600 (cível)
       RCV: { label: "RCV", fill: "#3b82f6" }, // blue-500
       DCV: { label: "DCV", fill: "#60a5fa" }, // blue-400
-      CR:  { label: "CR",  fill: "#dc2626" }, // red-600 (crime)
-      RCR: { label: "RCR", fill: "#ef4444" }, // red-500
-      DCR: { label: "DCR", fill: "#f87171" }, // red-400
+      CR:  { label: "CR",  fill: "#7c3aed" }, // violet-600 (crime)
+      RCR: { label: "RCR", fill: "#8b5cf6" }, // violet-500
+      DCR: { label: "DCR", fill: "#a78bfa" }, // violet-400
     };
 
     const counts: Record<string, number> = {};
@@ -3681,7 +3681,7 @@ export default function App() {
                                   });
                                   const ORIGEM_COLORS: Record<string, string> = {
                                     CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa',
-                                    CR: '#dc2626', RCR: '#ef4444', DCR: '#f87171',
+                                    CR: '#7c3aed', RCR: '#8b5cf6', DCR: '#a78bfa',
                                   };
                                   const order = ['CV','RCV','DCV','CR','RCR','DCR'];
                                   const sorted = Object.entries(byOrigem).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
