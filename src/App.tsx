@@ -182,6 +182,7 @@ export default function App() {
   const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(true);
   const [lastSyncTime, setLastSyncTime] = useState<string>("");
   const [syncingSheets, setSyncingSheets] = useState<boolean>(false);
+  const [syncDuration, setSyncDuration] = useState<number>(0);
   const [previewEntries, setPreviewEntries] = useState<
     Omit<ProductivityEntry, "id">[]
   >([]);
@@ -913,7 +914,7 @@ export default function App() {
       // Identifica por subcolunas de tipo como CV, RCV, DCV, CR, RCR, DCR
       const DETAIL_TYPE_CODES = new Set(["cv", "rcv", "dcv", "cr", "rcr", "dcr"]);
       let typesRowIdx = -1;
-      for (let i = 0; i < Math.min(8, rows.length); i++) {
+      for (let i = 0; i < Math.min(15, rows.length); i++) {
         const typeCodeCount = rows[i].filter(
           (c) => DETAIL_TYPE_CODES.has((c || "").toLowerCase().trim())
         ).length;
@@ -1437,8 +1438,14 @@ export default function App() {
       return;
     }
 
+    let timerId: any = null;
     if (showFeedback) {
       setSyncingSheets(true);
+      setSyncDuration(0);
+      const startTime = Date.now();
+      timerId = setInterval(() => {
+        setSyncDuration((Date.now() - startTime) / 1000);
+      }, 100);
       setSheetsMessage("Iniciando conexão de sincronização...");
     }
     setSheetSyncError("");
@@ -1472,13 +1479,16 @@ export default function App() {
       setSheetsMessage(parseResult.message);
       setSheetSyncError("");
 
-      // Salva automaticamente no Firestore em qualquer sincronização
-      // Se for sincronização periódica de background (sem feedback visual), salva apenas o dia de hoje para evitar sobrecarga, manter dados anteriores estáticos e economizar requisições
+      // Salva no Firestore — sincronização manual salva tudo, automática salva só o dia atual
       let finalEntriesToSave = parseResult.entries;
+      let finalDetailedProcesses = parseResult.detailedProcesses || [];
       if (!showFeedback) {
         const todayStr = getCurrentDate();
         finalEntriesToSave = parseResult.entries.filter(
           (e) => e.date === todayStr
+        );
+        finalDetailedProcesses = (parseResult.detailedProcesses || []).filter(
+          (p) => p.date === todayStr
         );
       }
 
@@ -1488,7 +1498,7 @@ export default function App() {
         urlStr,
         !showFeedback,
         parseResult.estagiariosDetailedToCreate || [],
-        parseResult.detailedProcesses || [],
+        finalDetailedProcesses,
       );
 
       if (showFeedback) {
@@ -1529,6 +1539,7 @@ export default function App() {
         alert(`Falha na sincronização em tempo real: ${errMsg}`);
       }
     } finally {
+      if (timerId) clearInterval(timerId);
       if (showFeedback) setSyncingSheets(false);
     }
   };
@@ -1596,6 +1607,11 @@ export default function App() {
 
     setIsSaving(true);
     setSyncingSheets(true);
+    setSyncDuration(0);
+    const startTime = Date.now();
+    const timerId = setInterval(() => {
+      setSyncDuration((Date.now() - startTime) / 1000);
+    }, 100);
     setSheetsMessage("Configurando vínculo e importando dados da planilha...");
     try {
       const nowIso = new Date().toISOString();
@@ -1664,6 +1680,7 @@ export default function App() {
       );
       setSheetSyncError(err.message || "");
     } finally {
+      if (timerId) clearInterval(timerId);
       setIsSaving(false);
       setSyncingSheets(false);
     }
@@ -1712,43 +1729,90 @@ export default function App() {
   ) => {
     setIsSaving(true);
     try {
-      // Gravar timestamps dos processos detalhados nas abas individuais se existirem
-      if (detailedProcesses && detailedProcesses.length > 0) {
-        const processesBySettingsKey: Record<string, typeof detailedProcesses> = {};
-        detailedProcesses.forEach((proc) => {
-          const monthKey = proc.date.substring(0, 7); // "2026-06"
-          const key = `proc_time_${proc.estagiarioId}_${monthKey}`;
-          if (!processesBySettingsKey[key]) {
-            processesBySettingsKey[key] = [];
+        // Gravar timestamps dos processos detalhados nas abas individuais se existirem
+        if (detailedProcesses && detailedProcesses.length > 0) {
+          const processesBySettingsKey: Record<string, typeof detailedProcesses> = {};
+          detailedProcesses.forEach((proc) => {
+            const monthKey = proc.date.substring(0, 7); // "2026-06"
+            const key = `proc_time_${proc.estagiarioId}_${monthKey}`;
+            if (!processesBySettingsKey[key]) {
+              processesBySettingsKey[key] = [];
+            }
+            processesBySettingsKey[key].push(proc);
+          });
+
+          for (const [key, procs] of Object.entries(processesBySettingsKey)) {
+            try {
+              // Sincronização manual (!isStartupSilent) substitui os dados existentes
+              // Sincronização automática (isStartupSilent) só adiciona novos
+              if (!isStartupSilent) {
+                // Substitui completamente — garante que os dados do sheet sejam refletidos fielmente
+                const freshData: Record<string, { origem: string; date: string; timestamp: string }> = {};
+                procs.forEach((p) => {
+                  if (!freshData[p.numeroProcesso]) {
+                    freshData[p.numeroProcesso] = {
+                      origem: p.origem,
+                      date: p.date,
+                      timestamp: new Date().toISOString(),
+                    };
+                  }
+                });
+                await setDoc(doc(db, "settings", key), freshData);
+              } else {
+                // Apenas adiciona entradas novas (não sobrescreve dados históricos)
+                const snap = await getDoc(doc(db, "settings", key));
+                const existingData: Record<string, { origem: string; date: string; timestamp: string }> = snap.exists() ? snap.data() || {} : {};
+                let hasChanges = false;
+
+                procs.forEach((p) => {
+                  if (!existingData[p.numeroProcesso]) {
+                    existingData[p.numeroProcesso] = {
+                      origem: p.origem,
+                      date: p.date,
+                      timestamp: new Date().toISOString(),
+                    };
+                    hasChanges = true;
+                  }
+                });
+
+                if (hasChanges || !snap.exists()) {
+                  await setDoc(doc(db, "settings", key), existingData);
+                }
+              }
+            } catch (procErr) {
+              console.error(`Erro ao salvar processos para chave ${key}:`, procErr);
+            }
           }
-          processesBySettingsKey[key].push(proc);
-        });
 
-        for (const [key, procs] of Object.entries(processesBySettingsKey)) {
-          try {
-            const snap = await getDoc(doc(db, "settings", key));
-            const existingData: Record<string, { origem: string; date: string; timestamp: string }> = snap.exists() ? snap.data() || {} : {};
-            let hasChanges = false;
+          // Atualiza o estado local allDetailedProcesses para refletir os dados novos imediatamente sem refresh
+          setAllDetailedProcesses((prev) => {
+            const next = { ...prev };
+            Object.entries(processesBySettingsKey).forEach(([key, procs]) => {
+              const parts = key.split("_");
+              if (parts.length >= 3) {
+                const estId = parts.slice(2, parts.length - 1).join("_");
+                if (!next[estId]) next[estId] = {};
 
-            procs.forEach((p) => {
-              if (!existingData[p.numeroProcesso]) {
-                existingData[p.numeroProcesso] = {
-                  origem: p.origem,
-                  date: p.date,
-                  timestamp: new Date().toISOString(),
-                };
-                hasChanges = true;
+                if (!isStartupSilent) {
+                  const newMap: Record<string, { origem: string; date: string }> = {};
+                  procs.forEach((p) => {
+                    newMap[p.numeroProcesso] = { origem: p.origem, date: p.date };
+                  });
+                  next[estId] = newMap;
+                } else {
+                  const existingMap = { ...next[estId] };
+                  procs.forEach((p) => {
+                    if (!existingMap[p.numeroProcesso]) {
+                      existingMap[p.numeroProcesso] = { origem: p.origem, date: p.date };
+                    }
+                  });
+                  next[estId] = existingMap;
+                }
               }
             });
-
-            if (hasChanges || !snap.exists()) {
-              await setDoc(doc(db, "settings", key), existingData);
-            }
-          } catch (procErr) {
-            console.error(`Erro ao salvar processos para chave ${key}:`, procErr);
-          }
+            return next;
+          });
         }
-      }
       // 1. Upsert estagiários (usar lista detalhada se disponível, fallback para lista de nomes)
       let estagiariosToUpsert: Estagiario[] = [];
 
@@ -2689,9 +2753,9 @@ export default function App() {
       CV:  { label: "CV",  fill: "#2563eb" }, // blue-600 (cível)
       RCV: { label: "RCV", fill: "#3b82f6" }, // blue-500
       DCV: { label: "DCV", fill: "#60a5fa" }, // blue-400
-      CR:  { label: "CR",  fill: "#dc2626" }, // red-600 (crime)
-      RCR: { label: "RCR", fill: "#ef4444" }, // red-500
-      DCR: { label: "DCR", fill: "#f87171" }, // red-400
+      CR:  { label: "CR",  fill: "#7c3aed" }, // violet-600 (crime)
+      RCR: { label: "RCR", fill: "#8b5cf6" }, // violet-500
+      DCR: { label: "DCR", fill: "#a78bfa" }, // violet-400
     };
 
     const counts: Record<string, number> = {};
@@ -3123,7 +3187,7 @@ export default function App() {
                     disabled={syncingSheets}
                     className="px-3 py-1.5 bg-amber-600 hover:bg-amber-750 text-white rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer disabled:opacity-55"
                   >
-                    {syncingSheets ? "Sincronizando..." : "Tentar Novamente"}
+                    {syncingSheets ? `Sincronizando (${syncDuration.toFixed(1)}s)...` : "Tentar Novamente"}
                   </button>
                   <button
                     onClick={handleGoogleLogin}
@@ -3532,6 +3596,33 @@ export default function App() {
                         <span className="text-[9px] text-indigo-100 font-bold mt-1 w-full text-center truncate">
                           PROCESSOS CONCLUÍDOS
                         </span>
+                        {/* Team-wide process type breakdown for today */}
+                        {(() => {
+                          const teamByOrigem: Record<string, number> = {};
+                          Object.values(allDetailedProcesses).forEach((procs) => {
+                            if (!procs) return;
+                            const dayProcs = Object.values(procs).filter((p: any) => p.date === selectedDetailDate);
+                            dayProcs.forEach((p: any) => {
+                              const o = p.origem || 'Sem origem';
+                              teamByOrigem[o] = (teamByOrigem[o] || 0) + 1;
+                            });
+                          });
+                          const order = ['CV','RCV','DCV','CR','RCR','DCR'];
+                          const sorted = Object.entries(teamByOrigem).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
+                          if (sorted.length === 0) return null;
+                          return (
+                            <div className="flex flex-wrap gap-1 justify-center mt-2 w-full border-t border-white/15 pt-2">
+                              {sorted.map(([origem, count]) => (
+                                <span
+                                  key={origem}
+                                  className="text-[8px] font-black px-1.5 py-0.5 rounded bg-white/15 text-white"
+                                >
+                                  {origem}:{count}
+                                </span>
+                              ))}
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {parsedEstagiariosData
@@ -3590,6 +3681,38 @@ export default function App() {
                                     META: {est.dailyGoal}
                                   </span>
                                 )}
+
+                                {/* Process type breakdown for this day */}
+                                {(() => {
+                                  const procs = allDetailedProcesses[est.id];
+                                  if (!procs) return null;
+                                  const dayProcs = Object.values(procs).filter((p: any) => p.date === selectedDetailDate);
+                                  if (dayProcs.length === 0) return null;
+                                  const byOrigem: Record<string, number> = {};
+                                  dayProcs.forEach((p: any) => {
+                                    const o = p.origem || 'Sem origem';
+                                    byOrigem[o] = (byOrigem[o] || 0) + 1;
+                                  });
+                                  const ORIGEM_COLORS: Record<string, string> = {
+                                    CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa',
+                                    CR: '#7c3aed', RCR: '#8b5cf6', DCR: '#a78bfa',
+                                  };
+                                  const order = ['CV','RCV','DCV','CR','RCR','DCR'];
+                                  const sorted = Object.entries(byOrigem).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
+                                  return (
+                                    <div className="flex flex-wrap gap-1 justify-center mt-1.5">
+                                      {sorted.map(([origem, count]) => (
+                                        <span
+                                          key={origem}
+                                          className="text-[9px] font-bold px-1.5 py-0.5 rounded"
+                                          style={{ backgroundColor: (ORIGEM_COLORS[origem] || '#94a3b8') + '20', color: ORIGEM_COLORS[origem] || '#94a3b8' }}
+                                        >
+                                          {origem}:{count}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  );
+                                })()}
 
                                 {/* Indicador de clicável */}
                                 <div className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-center">
@@ -5063,8 +5186,8 @@ export default function App() {
                       )}
 
                       <div className="space-y-2.5">
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                          <div className="sm:col-span-2">
+                        <div className="flex flex-col gap-3">
+                          <div>
                             <label className="block text-[9px] uppercase font-bold text-emerald-800 tracking-wider mb-1">
                               Link do Google Planilhas
                             </label>
@@ -5074,18 +5197,6 @@ export default function App() {
                               value={spreadsheetUrl}
                               onChange={(e) => setSpreadsheetUrl(e.target.value)}
                               className="w-full px-3 py-2 bg-white border border-slate-350 rounded-lg text-xs outline-none focus:border-emerald-500 font-mono shadow-3xs"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[9px] uppercase font-bold text-emerald-800 tracking-wider mb-1">
-                              Nome da Aba (Aba Alvo)
-                            </label>
-                            <input
-                              type="text"
-                              placeholder="Ex: Controle detalhado"
-                              value={selectedSheetName}
-                              onChange={(e) => setSelectedSheetName(e.target.value)}
-                              className="w-full px-3 py-2 bg-white border border-slate-350 rounded-lg text-xs outline-none focus:border-emerald-500 font-sans font-bold text-slate-700 shadow-3xs"
                             />
                           </div>
                         </div>
@@ -5098,7 +5209,7 @@ export default function App() {
                             className="bg-emerald-700 text-white hover:bg-emerald-800 px-5 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 font-sans shadow-xs"
                           >
                             {syncingSheets
-                              ? "Sincronizando..."
+                              ? `Sincronizando (${syncDuration.toFixed(1)}s)...`
                               : "Sincronizar Planilha Agora"}
                           </button>
                         </div>
@@ -5139,7 +5250,7 @@ export default function App() {
                             className="bg-slate-900 text-white hover:bg-slate-800 px-3.5 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer disabled:opacity-55"
                           >
                             {isSaving
-                              ? "Gravando e Sincronizando..."
+                              ? `Gravando e Sincronizando (${syncDuration.toFixed(1)}s)...`
                               : "Salvar Vínculo"}
                           </button>
                         </div>
