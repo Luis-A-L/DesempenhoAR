@@ -26,7 +26,14 @@ export const supabase = isSupabaseConfigured
   ? createClient(credentials!.url, credentials!.key)
     : ({
             from: () => ({
-                      select: () => ({ eq: () => Promise.resolve({ data: [], error: null }) }),
+                      select: () => ({
+                          eq: () => Promise.resolve({ data: [], error: null }),
+                          range: () => ({
+                              eq: () => Promise.resolve({ data: [], error: null }),
+                          }),
+                          maybeSingle: () => Promise.resolve({ data: null, error: null }),
+                          single: () => Promise.resolve({ data: null, error: null }),
+                      }),
                       insert: () => Promise.resolve({ data: null, error: null }),
                       upsert: () => Promise.resolve({ data: null, error: null }),
                       update: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
