@@ -25,20 +25,38 @@ export const isSupabaseConfigured = credentials !== null
 export const supabase = isSupabaseConfigured
   ? createClient(credentials!.url, credentials!.key)
     : ({
-            from: () => ({
-                      select: () => ({
-                          eq: () => Promise.resolve({ data: [], error: null }),
-                          range: () => ({
-                              eq: () => Promise.resolve({ data: [], error: null }),
-                          }),
-                          maybeSingle: () => Promise.resolve({ data: null, error: null }),
-                          single: () => Promise.resolve({ data: null, error: null }),
-                      }),
-                      insert: () => Promise.resolve({ data: null, error: null }),
-                      upsert: () => Promise.resolve({ data: null, error: null }),
-                      update: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
-                      delete: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
-            }),
+            from: () => {
+                      const chain = <T = any>(data: T[] = [], error: any = null) => {
+                              const result = { data, error }
+                              const thenable = Promise.resolve(result)
+                              return {
+                                      eq: () => chain(data, error),
+                                      neq: () => chain(data, error),
+                                      gt: () => chain(data, error),
+                                      gte: () => chain(data, error),
+                                      lt: () => chain(data, error),
+                                      lte: () => chain(data, error),
+                                      like: () => chain(data, error),
+                                      ilike: () => chain(data, error),
+                                      is: () => chain(data, error),
+                                      in: () => chain(data, error),
+                                      contains: () => chain(data, error),
+                                      range: () => chain(data, error),
+                                      maybeSingle: () => Promise.resolve({ data: data[0] ?? null, error }),
+                                      single: () => Promise.resolve({ data: data[0] ?? null, error }),
+                                      then: thenable.then.bind(thenable),
+                                      catch: thenable.catch.bind(thenable),
+                                      finally: thenable.finally.bind(thenable),
+                              }
+                      }
+                      return {
+                              select: () => chain<any[]>([]),
+                              insert: (vals: any) => Promise.resolve({ data: vals ?? null, error: null }),
+                              upsert: (vals: any) => Promise.resolve({ data: vals ?? null, error: null }),
+                              update: () => chain<any>(null),
+                              delete: () => chain<any>(null),
+                      }
+            },
             auth: {
                       getSession: () => Promise.resolve({ data: { session: null } }),
                       onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
