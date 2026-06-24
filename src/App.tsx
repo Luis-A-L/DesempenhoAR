@@ -2848,50 +2848,24 @@ export default function App() {
     });
   }, [normalizedEntries, selectedMonth]);
 
-  // Weekly Ranking Data for Grouped Bar Chart (per intern, per week)
-  const INTERN_COLORS = [
-    "#4f46e5", "#0ea5e9", "#8b5cf6", "#f59e0b", "#ef4444",
-    "#14b8a6", "#f97316", "#06b6d4", "#a855f7", "#84cc16",
-    "#ec4899", "#6366f1", "#d946ef", "#22c55e", "#eab308",
-  ];
-  const weeklyRankingData = useMemo(() => {
+  // Ranking mensal por estagiário (lista simples)
+  const monthlyRanking = useMemo(() => {
     const filteredEntries = normalizedEntries.filter((e) =>
       e.date.startsWith(selectedMonth),
     );
 
-    // Only interns with at least one entry
-    const activeEstagiarios = parsedEstagiariosData
-      .filter((e) => e.totalAnalyzed > 0)
-      .map((e) => ({ id: e.id, name: e.name }));
-
-    const [y, m] = selectedMonth.split("-");
-    const year = parseInt(y, 10);
-    const month = parseInt(m, 10);
-    const daysInMonth = new Date(year, month, 0).getDate();
-
-    // week number -> { estagiarioId: count }
-    const weeklyMap: Record<number, Record<string, number>> = {};
-    for (let d = 1; d <= daysInMonth; d++) {
-      const w = Math.ceil(d / 7);
-      if (!weeklyMap[w]) weeklyMap[w] = {};
-    }
+    const countMap = new Map<string, number>();
 
     for (const e of filteredEntries) {
-      const day = parseInt(e.date.split("-")[2], 10);
-      const w = Math.ceil(day / 7);
-      if (!weeklyMap[w]) weeklyMap[w] = {};
-      weeklyMap[w][e.estagiarioId] = (weeklyMap[w][e.estagiarioId] || 0) + e.count;
+      const est = parsedEstagiariosData.find((s) => s.id === e.estagiarioId);
+      if (!est) continue;
+      const name = est.name || e.estagiarioId;
+      countMap.set(name, (countMap.get(name) || 0) + e.count);
     }
 
-    return Object.entries(weeklyMap)
-      .sort(([a], [b]) => parseInt(a) - parseInt(b))
-      .map(([week, interns]) => {
-        const entry: Record<string, string | number> = { week: `Semana ${week}` };
-        activeEstagiarios.forEach((est) => {
-          entry[est.name] = interns[est.id] || 0;
-        });
-        return entry;
-      });
+    return Array.from(countMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
   }, [normalizedEntries, selectedMonth, parsedEstagiariosData]);
 
   // Distribution by Process Type — carrega dos processos detalhados salvos nas settings
@@ -3698,70 +3672,43 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Weekly Ranking Chart */}
-                  {weeklyRankingData.length > 0 && (
+                  {/* Ranking Mensal (Lista) */}
+                  {monthlyRanking.length > 0 && (
                     <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
                       <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
                         <Award className="w-4 h-4 text-amber-500" />
-                        RANKING SEMANAL POR ESTAGIÁRIO (
+                        RANKING MENSAL (
                         {selectedMonth.split("-").reverse().join("/")})
                       </h2>
-                      <div className="h-[350px] w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart
-                            data={weeklyRankingData}
-                            margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                      <div className="space-y-1">
+                        {monthlyRanking.map((item, i) => (
+                          <div
+                            key={item.name}
+                            className="flex items-center justify-between px-3 py-2 rounded-lg text-sm"
+                            style={{
+                              backgroundColor:
+                                i === 0
+                                  ? "#fef3c7"
+                                  : i === 1
+                                  ? "#f1f5f9"
+                                  : i === 2
+                                  ? "#fef2f2"
+                                  : "transparent",
+                            }}
                           >
-                            <CartesianGrid
-                              strokeDasharray="3 3"
-                              vertical={false}
-                              stroke="#e2e8f0"
-                            />
-                            <XAxis
-                              dataKey="week"
-                              axisLine={false}
-                              tickLine={false}
-                              tick={{ fontSize: 11, fill: "#64748b" }}
-                              dy={10}
-                            />
-                            <YAxis
-                              axisLine={false}
-                              tickLine={false}
-                              tick={{ fontSize: 10, fill: "#64748b" }}
-                            />
-                            <Tooltip
-                              cursor={{ fill: "#f1f5f9" }}
-                              contentStyle={{
-                                borderRadius: "8px",
-                                border: "none",
-                                boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
-                              }}
-                              labelStyle={{
-                                fontWeight: "bold",
-                                color: "#0f172a",
-                              }}
-                            />
-                            <Legend
-                              wrapperStyle={{
-                                fontSize: "10px",
-                                fontWeight: 600,
-                                paddingTop: "8px",
-                              }}
-                            />
-                            {weeklyRankingData.length > 0 &&
-                              Object.keys(weeklyRankingData[0])
-                                .filter((k) => k !== "week")
-                                .map((name, i) => (
-                                  <Bar
-                                    key={name}
-                                    dataKey={name}
-                                    fill={INTERN_COLORS[i % INTERN_COLORS.length]}
-                                    radius={[3, 3, 0, 0]}
-                                    maxBarSize={24}
-                                  />
-                                ))}
-                          </BarChart>
-                        </ResponsiveContainer>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-slate-400 w-5 text-right">
+                                {i + 1}º
+                              </span>
+                              <span className="font-medium text-slate-800">
+                                {item.name}
+                              </span>
+                            </div>
+                            <span className="font-bold text-indigo-600">
+                              {item.count}
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   )}
