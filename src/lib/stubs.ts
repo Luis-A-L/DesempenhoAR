@@ -100,6 +100,7 @@ export const getDocs = async (ref: CollectionRef | QueryRef): Promise<{
           estagiarioId: rest.estagiario_id,
           date: rest.date,
           count: rest.count,
+          typeBreakdown: rest.type_breakdown ?? {},
           ...rest,
         }
       }
@@ -161,6 +162,7 @@ const mapEntryToRow = (data: Partial<ProductivityEntry>) => ({
   estagiario_id: data.estagiarioId,
   date: data.date,
   count: data.count ?? 0,
+  type_breakdown: data.typeBreakdown ?? {},
 })
 
 export const setDoc = async (ref: DocRef, data: any, options?: any): Promise<void> => {
@@ -293,6 +295,7 @@ export const batchUpsertEntries = async (items: Omit<ProductivityEntry, 'id'>[])
     estagiario_id: e.estagiarioId,
     date: e.date,
     count: e.count,
+    type_breakdown: e.typeBreakdown ?? {},
   }))
 
   // Upsert em grupos de 500
@@ -451,6 +454,26 @@ export const subscribeToEntries = (
       { event: 'DELETE', schema: 'public', table: 'productivity_entries' },
       (payload) => {
         onDelete((payload.old as any).id)
+      }
+    )
+    .subscribe()
+
+  return () => supabase.removeChannel(channel)
+}
+
+export const subscribeToSettings = (
+  onUpdate: (key: string, value: any) => void
+) => {
+  const channel = supabase
+    .channel('settings-changes')
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'settings' },
+      (payload) => {
+        const r = payload.new as any
+        if (r && r.key) {
+          onUpdate(r.key, r.value)
+        }
       }
     )
     .subscribe()
