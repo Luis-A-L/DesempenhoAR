@@ -37,6 +37,7 @@ import {
   Cell,
   Line,
   ComposedChart,
+  Legend,
 } from "recharts";
 import {
   Plus,
@@ -476,7 +477,8 @@ export default function App() {
         setAutoSyncEnabled(
           settingsData.autoSync !== undefined ? settingsData.autoSync : true,
         );
-        setSelectedSheetName(settingsData.selectedSheetName || "Controle detalhado");
+        // Sempre usa "Controle detalhado" — ignorar valor antigo "Controle" do banco
+        setSelectedSheetName("Controle detalhado");
         setLastSyncTime(settingsData.lastSync || "");
       }
 
@@ -958,9 +960,8 @@ export default function App() {
         diagTypesRowIdx = typesRowIdx;
         diagTotalRows = rows.length;
 
-        // A linha de nomes de usuários é a anterior à linha de tipos
-        const namesRowIdx = typesRowIdx - 1;
-        if (namesRowIdx < 0) return;
+        // Linha de nomes: se houver linha acima, usa ela; senão, nomes estão na mesma linha dos tipos
+        const namesRowIdx = typesRowIdx > 0 ? typesRowIdx - 1 : typesRowIdx;
 
         const namesRow = rows[namesRowIdx];
         const typesRow = rows[typesRowIdx];
@@ -2013,7 +2014,8 @@ export default function App() {
       } else if (key === "googleSheet") {
         setSpreadsheetUrl(value?.url || DEFAULT_SHEET_URL);
         setAutoSyncEnabled(value?.autoSync !== undefined ? value.autoSync : true);
-        setSelectedSheetName(value?.selectedSheetName || "Controle detalhado");
+        // Sempre usa "Controle detalhado" para a aba, ignorando valor antigo do banco
+        setSelectedSheetName("Controle detalhado");
         setLastSyncTime(value?.lastSync || "");
       }
     });
@@ -2846,6 +2848,52 @@ export default function App() {
     });
   }, [normalizedEntries, selectedMonth]);
 
+  // Weekly Ranking Data for Grouped Bar Chart (per intern, per week)
+  const INTERN_COLORS = [
+    "#4f46e5", "#0ea5e9", "#8b5cf6", "#f59e0b", "#ef4444",
+    "#14b8a6", "#f97316", "#06b6d4", "#a855f7", "#84cc16",
+    "#ec4899", "#6366f1", "#d946ef", "#22c55e", "#eab308",
+  ];
+  const weeklyRankingData = useMemo(() => {
+    const filteredEntries = normalizedEntries.filter((e) =>
+      e.date.startsWith(selectedMonth),
+    );
+
+    // Only interns with at least one entry
+    const activeEstagiarios = parsedEstagiariosData
+      .filter((e) => e.totalAnalyzed > 0)
+      .map((e) => ({ id: e.id, name: e.name }));
+
+    const [y, m] = selectedMonth.split("-");
+    const year = parseInt(y, 10);
+    const month = parseInt(m, 10);
+    const daysInMonth = new Date(year, month, 0).getDate();
+
+    // week number -> { estagiarioId: count }
+    const weeklyMap: Record<number, Record<string, number>> = {};
+    for (let d = 1; d <= daysInMonth; d++) {
+      const w = Math.ceil(d / 7);
+      if (!weeklyMap[w]) weeklyMap[w] = {};
+    }
+
+    for (const e of filteredEntries) {
+      const day = parseInt(e.date.split("-")[2], 10);
+      const w = Math.ceil(day / 7);
+      if (!weeklyMap[w]) weeklyMap[w] = {};
+      weeklyMap[w][e.estagiarioId] = (weeklyMap[w][e.estagiarioId] || 0) + e.count;
+    }
+
+    return Object.entries(weeklyMap)
+      .sort(([a], [b]) => parseInt(a) - parseInt(b))
+      .map(([week, interns]) => {
+        const entry: Record<string, string | number> = { week: `Semana ${week}` };
+        activeEstagiarios.forEach((est) => {
+          entry[est.name] = interns[est.id] || 0;
+        });
+        return entry;
+      });
+  }, [normalizedEntries, selectedMonth, parsedEstagiariosData]);
+
   // Distribution by Process Type — carrega dos processos detalhados salvos nas settings
   const distributionChartData = useMemo(() => {
     // Tipos de processo e suas cores premium
@@ -3649,6 +3697,74 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Weekly Ranking Chart */}
+                  {weeklyRankingData.length > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+                      <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
+                        <Award className="w-4 h-4 text-amber-500" />
+                        RANKING SEMANAL POR ESTAGIÁRIO (
+                        {selectedMonth.split("-").reverse().join("/")})
+                      </h2>
+                      <div className="h-[350px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart
+                            data={weeklyRankingData}
+                            margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                          >
+                            <CartesianGrid
+                              strokeDasharray="3 3"
+                              vertical={false}
+                              stroke="#e2e8f0"
+                            />
+                            <XAxis
+                              dataKey="week"
+                              axisLine={false}
+                              tickLine={false}
+                              tick={{ fontSize: 11, fill: "#64748b" }}
+                              dy={10}
+                            />
+                            <YAxis
+                              axisLine={false}
+                              tickLine={false}
+                              tick={{ fontSize: 10, fill: "#64748b" }}
+                            />
+                            <Tooltip
+                              cursor={{ fill: "#f1f5f9" }}
+                              contentStyle={{
+                                borderRadius: "8px",
+                                border: "none",
+                                boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
+                              }}
+                              labelStyle={{
+                                fontWeight: "bold",
+                                color: "#0f172a",
+                              }}
+                            />
+                            <Legend
+                              wrapperStyle={{
+                                fontSize: "10px",
+                                fontWeight: 600,
+                                paddingTop: "8px",
+                              }}
+                            />
+                            {weeklyRankingData.length > 0 &&
+                              Object.keys(weeklyRankingData[0])
+                                .filter((k) => k !== "week")
+                                .map((name, i) => (
+                                  <Bar
+                                    key={name}
+                                    dataKey={name}
+                                    fill={INTERN_COLORS[i % INTERN_COLORS.length]}
+                                    radius={[3, 3, 0, 0]}
+                                    maxBarSize={24}
+                                  />
+                                ))}
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Detalhe do Dia Selecionado List */}
                   <div className="bg-white border text-center border-indigo-200 rounded-xl shadow-sm overflow-hidden mb-0">
