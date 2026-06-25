@@ -2922,18 +2922,58 @@ export default function App() {
     });
   }, [normalizedEntries, selectedMonth]);
 
-  // Monthly Ranking List (Sorted descending by total productivity in the selected month)
-  const monthlyRankingList = useMemo(() => {
-    return parsedEstagiariosData
-      .filter((e) => e.totalAnalyzed > 0)
-      .sort((a, b) => b.totalAnalyzed - a.totalAnalyzed)
+  // Weekly Ranking List (Sorted descending by total productivity in the week containing selectedDetailDate)
+  const weeklyRankingList = useMemo(() => {
+    if (!selectedDetailDate) return [];
+    
+    // Parse the selected detail date (e.g., "2026-06-25")
+    const d = new Date(selectedDetailDate + "T12:00:00");
+    const dayOfWeek = d.getDay(); // 0 (Sunday) to 6 (Saturday)
+    
+    const startOfWeek = new Date(d.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
+    const endOfWeek = new Date(d.getTime() + (6 - dayOfWeek) * 24 * 60 * 60 * 1000);
+    
+    const startStr = `${startOfWeek.getFullYear()}-${String(startOfWeek.getMonth() + 1).padStart(2, "0")}-${String(startOfWeek.getDate()).padStart(2, "0")}`;
+    const endStr = `${endOfWeek.getFullYear()}-${String(endOfWeek.getMonth() + 1).padStart(2, "0")}-${String(endOfWeek.getDate()).padStart(2, "0")}`;
+    
+    // Filter entries within this week
+    const weekEntries = normalizedEntries.filter(
+      (e) => e.date >= startStr && e.date <= endStr
+    );
+    
+    // Sum counts per estagiario
+    const countsMap: Record<string, number> = {};
+    weekEntries.forEach((e) => {
+      countsMap[e.estagiarioId] = (countsMap[e.estagiarioId] || 0) + e.count;
+    });
+    
+    // Map to list and sort descending
+    return estagiarios
+      .map((est) => {
+        const count = countsMap[est.id] || 0;
+        return {
+          id: est.id,
+          name: est.name,
+          count,
+        };
+      })
+      .filter((e) => e.count > 0)
+      .sort((a, b) => b.count - a.count)
       .map((est, index) => ({
-        id: est.id,
-        name: est.name,
-        count: est.totalAnalyzed,
+        ...est,
         rank: index + 1,
       }));
-  }, [parsedEstagiariosData]);
+  }, [normalizedEntries, selectedDetailDate, estagiarios]);
+
+  const weeklyRangeLabel = useMemo(() => {
+    if (!selectedDetailDate) return "";
+    const d = new Date(selectedDetailDate + "T12:00:00");
+    const dayOfWeek = d.getDay();
+    const startOfWeek = new Date(d.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
+    const endOfWeek = new Date(d.getTime() + (6 - dayOfWeek) * 24 * 60 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(startOfWeek.getDate())}/${pad(startOfWeek.getMonth() + 1)} a ${pad(endOfWeek.getDate())}/${pad(endOfWeek.getMonth() + 1)}`;
+  }, [selectedDetailDate]);
 
   // Distribution by Process Type — carrega dos processos detalhados salvos nas settings
   const distributionChartData = useMemo(() => {
@@ -3738,17 +3778,17 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Monthly Ranking List */}
+                    {/* Weekly Ranking List */}
                     <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4 flex flex-col justify-start h-[348px] gap-2">
                       <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
                         <Award className="w-4 h-4 text-indigo-500" />
-                        RANKING DO MÊS
+                        RANKING DA SEMANA ({weeklyRangeLabel})
                       </h2>
                       <div className="overflow-y-auto pr-1 space-y-0.5 max-h-[285px]">
-                        {monthlyRankingList.length === 0 ? (
-                          <p className="text-xs text-slate-400 text-center py-10 font-medium">Nenhum dado registrado este mês.</p>
+                        {weeklyRankingList.length === 0 ? (
+                          <p className="text-xs text-slate-400 text-center py-10 font-medium">Nenhum dado registrado esta semana.</p>
                         ) : (
-                          monthlyRankingList.map((est, rankIdx) => (
+                          weeklyRankingList.map((est, rankIdx) => (
                             <div key={est.id} className="flex items-center gap-3 text-xs py-0.5 border-b border-slate-50 last:border-0">
                               <div className="flex items-center gap-2 w-36 shrink-0">
                                 <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black ${
