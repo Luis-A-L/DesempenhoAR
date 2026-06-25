@@ -385,10 +385,14 @@ export default function App() {
       setLoading(true);
 
       // 1. Carregar estagiários
+      const SKIP_IDS = new Set(["total", "livre_1", "pietro"]);
       const estagiariosSnap = await getDocs(collection(db, "estagiarios"));
       const estagiariosList: Estagiario[] = [];
       estagiariosSnap.forEach((docSnap) => {
-        estagiariosList.push({ id: docSnap.id, ...docSnap.data() } as Estagiario);
+        const estag = { id: docSnap.id, ...docSnap.data() } as Estagiario;
+        if (!SKIP_IDS.has(estag.id)) {
+          estagiariosList.push(estag);
+        }
       });
       estagiariosList.sort((a, b) => a.name.localeCompare(b.name));
       setEstagiarios(estagiariosList);
@@ -401,7 +405,9 @@ export default function App() {
           id: docSnap.id,
           ...docSnap.data(),
         } as ProductivityEntry;
-        entriesList.push(data);
+        if (!SKIP_IDS.has(data.estagiarioId)) {
+          entriesList.push(data);
+        }
       });
 
       // Garantir o carregamento completo do dia 22/06/2026 (bypass do limite de 1000 do PostgREST)
