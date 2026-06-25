@@ -513,6 +513,8 @@ export default function App() {
     let diagFirstRowDump = "";
     let diagFirstDateRaw = "";
     let diagFirstDateIso = "";
+    let debugRows: string[][] = [];
+    const SKIP_IDS = new Set(["total", "livre_1", "pietro"]);
 
     const normalizeText = (text: string) =>
       text
@@ -566,31 +568,43 @@ export default function App() {
 
     const parseDateToISO = (dateStr: string): string | null => {
       const getIso = () => {
+        if (!dateStr) return null;
         let cleaned = dateStr.trim();
-        if (!cleaned) return null;
 
-        // Se tiver data e hora, pega apenas a data
+        // Se já estiver no formato YYYY-MM-DD
+        if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
+
+        // Procura por DD/MM/YYYY ou DD/MM/YY ou DD-MM-YYYY no início (ex: "25/06/2026-Quinta")
+        const slashMatch = cleaned.match(/^(\d{1,2})[\/\-](\d{1,2}|\w{3,4})[\/\-](\d{2,4})/);
+        if (slashMatch) {
+          const [, day, monthStr, yearStr] = slashMatch;
+          const year = yearStr.length === 2 ? `20${yearStr}` : yearStr;
+          const month = translateMonthToNum(monthStr);
+          return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+        }
+
+        // Procura por Date(2026,5,25) ou similar (formato retornado pelo Google Visualization API)
+        const gvizMatch = cleaned.match(/Date\((\d{4}),\s*(\d{1,2}),\s*(\d{1,2})\)/i);
+        if (gvizMatch) {
+          const [, y, m, d] = gvizMatch;
+          // O mês no Gviz é 0-indexado (0 = Jan, 5 = Jun)
+          const monthVal = String(parseInt(m, 10) + 1).padStart(2, "0");
+          return `${y}-${monthVal}-${d.padStart(2, "0")}`;
+        }
+
+        // Procura por YYYY/MM/DD ou YYYY-MM-DD no início
+        const isoMatch = cleaned.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+        if (isoMatch) {
+          const [, year, month, day] = isoMatch;
+          return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+        }
+
+        // Caso tenha espaços, tenta pegar o primeiro token
         if (cleaned.includes(" ")) {
           cleaned = cleaned.split(" ")[0].trim();
         }
 
-        // Se for YYYY-MM-DD
-        if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
-
-        // Se for formato com traço (ex: YYYY-M-D ou DD-MM-[YY]YY)
-        const dashParts = cleaned.split("-");
-        if (dashParts.length === 3) {
-          const [p1, p2, p3] = dashParts;
-          if (p1.length === 4) {
-            return `${p1}-${p2.padStart(2, "0")}-${p3.padStart(2, "0")}`;
-          } else if (p3.length === 4 || p3.length === 2) {
-            const year = p3.length === 2 ? `20${p3}` : p3;
-            const month = translateMonthToNum(p2);
-            return `${year}-${month.padStart(2, "0")}-${p1.padStart(2, "0")}`;
-          }
-        }
-
-        // Se for formato com barras (ex: DD/MM/YYYY ou DD/MM/YY)
+        // Formato com barras clássico (DD/MM/YYYY)
         const slashParts = cleaned.split("/");
         if (slashParts.length === 3) {
           const [day, monthStr, yearStr] = slashParts;
@@ -939,17 +953,20 @@ export default function App() {
         line.split(delimiter).map((c) => c.trim().replace(/^["']|["']$/g, "")),
       );
 
+      debugRows = rows.slice(0, 10);
+
       // 3.0 Detectar formato DETALHADO ("Controle detalhado")
       // Identifica por subcolunas de tipo como CV, RCV, DCV, CR, RCR, DCR
       const DETAIL_TYPE_CODES = new Set(["cv", "rcv", "dcv", "cr", "rcr", "dcr"]);
       let typesRowIdx = -1;
+      let maxTypeCodeCount = -1;
       for (let i = 0; i < Math.min(15, rows.length); i++) {
         const typeCodeCount = rows[i].filter(
           (c) => DETAIL_TYPE_CODES.has((c || "").toLowerCase().trim())
         ).length;
-        if (typeCodeCount >= 3) {
+        if (typeCodeCount >= 3 && typeCodeCount > maxTypeCodeCount) {
+          maxTypeCodeCount = typeCodeCount;
           typesRowIdx = i;
-          break;
         }
       }
 
@@ -960,8 +977,19 @@ export default function App() {
         diagTypesRowIdx = typesRowIdx;
         diagTotalRows = rows.length;
 
-        // Linha de nomes: se houver linha acima, usa ela; senão, nomes estão na mesma linha dos tipos
-        const namesRowIdx = typesRowIdx > 0 ? typesRowIdx - 1 : typesRowIdx;
+        // Linha de nomes: procura a linha de nomes subindo a partir de typesRowIdx
+        let namesRowIdx = typesRowIdx > 0 ? typesRowIdx - 1 : typesRowIdx;
+        for (let r = typesRowIdx - 1; r >= 0; r--) {
+          const row = rows[r];
+          const textCellCount = row.filter((c) => {
+            const trimmed = (c || "").trim();
+            return trimmed && !/^\d+(\.\d+)?%?$/.test(trimmed) && !DETAIL_TYPE_CODES.has(trimmed.toLowerCase());
+          }).length;
+          if (textCellCount >= 3) {
+            namesRowIdx = r;
+            break;
+          }
+        }
 
         const namesRow = rows[namesRowIdx];
         const typesRow = rows[typesRowIdx];
@@ -1023,6 +1051,8 @@ export default function App() {
               estagiariosCreatedTemp.push(userName);
             userId = generatedId;
           }
+
+          if (SKIP_IDS.has(userId)) continue;
 
           if (!userColsMap[userId]) userColsMap[userId] = { name: userName, cols: [] };
           userColsMap[userId].cols.push(c);
@@ -1189,7 +1219,7 @@ export default function App() {
               estagiarioId = generatedId;
             }
 
-            if (individualEstagiarioIds.has(estagiarioId)) continue;
+            if (SKIP_IDS.has(estagiarioId) || individualEstagiarioIds.has(estagiarioId)) continue;
 
             const cleanedVal = qtdStr.replace(/\s/g, "").replace(",", ".");
             const parsedVal = Math.round(parseFloat(cleanedVal));
@@ -1363,7 +1393,7 @@ export default function App() {
           return;
 
         mappedCols.forEach(({ colIndex, estagiarioId }) => {
-          if (individualEstagiarioIds.has(estagiarioId)) {
+          if (SKIP_IDS.has(estagiarioId) || individualEstagiarioIds.has(estagiarioId)) {
             return;
           }
 
@@ -1410,6 +1440,7 @@ export default function App() {
         .replace(/[^a-z0-9_]/g, "");
       if (
         code &&
+        !SKIP_IDS.has(code) &&
         !estagiariosFromSheet.some((e) => e.id === code) &&
         !currentEstagiarios.some((e) => e.id === code)
       ) {
@@ -1448,6 +1479,7 @@ export default function App() {
       estagiariosDetailedToCreate: estagiariosFromSheet,
       detailedProcesses: parsedDetailedProcesses,
       message: msg,
+      debugRows: debugRows,
     };
   };
 
@@ -1497,6 +1529,27 @@ export default function App() {
         activeEstagiarios,
         selectedSheetName,
       );
+
+      if (showFeedback) {
+        try {
+          await setDoc(
+            doc(db, "settings", "sync_diagnostics_raw"),
+            {
+              timestamp: new Date().toISOString(),
+              showFeedback,
+              sheetsNames: Object.keys(resData.sheets || {}),
+              message: parseResult.message,
+              entriesCount: parseResult.entries?.length || 0,
+              entries: (parseResult.entries || []).map(e => ({ estagiarioId: e.estagiarioId, date: e.date, count: e.count })),
+              detailedProcessesCount: parseResult.detailedProcesses?.length || 0,
+              detailedProcesses: (parseResult.detailedProcesses || []).slice(0, 10),
+              debugRows: parseResult.debugRows || [],
+            }
+          );
+        } catch (diagErr) {
+          console.error("Failed raw diagnostics write:", diagErr);
+        }
+      }
 
       if (!parseResult.success) {
         setHasSpreadsheetAccess(false);
@@ -1964,6 +2017,21 @@ export default function App() {
         { merge: true },
       );
       setLastSyncTime(nowIso);
+
+      try {
+        await setDoc(
+          doc(db, "settings", "sync_diagnostics"),
+          {
+            timestamp: nowIso,
+            entriesToSaveCount: entriesToSave.length,
+            entriesToSave: entriesToSave.map(e => ({ estagiarioId: e.estagiarioId, date: e.date, count: e.count })),
+            estagiariosToCreate,
+            detailedProcessesCount: detailedProcesses.length,
+          }
+        );
+      } catch (diagErr) {
+        console.error("Failed to write sync diagnostics:", diagErr);
+      }
 
       // O mês selecionado não é mais alterado automaticamente no final da sincronização para respeitar a navegação do usuário e manter o mês atual selecionado.
 
@@ -2848,51 +2916,18 @@ export default function App() {
     });
   }, [normalizedEntries, selectedMonth]);
 
-  // Weekly Ranking Data for Grouped Bar Chart (per intern, per week)
-  const INTERN_COLORS = [
-    "#4f46e5", "#0ea5e9", "#8b5cf6", "#f59e0b", "#ef4444",
-    "#14b8a6", "#f97316", "#06b6d4", "#a855f7", "#84cc16",
-    "#ec4899", "#6366f1", "#d946ef", "#22c55e", "#eab308",
-  ];
-  const weeklyRankingData = useMemo(() => {
-    const filteredEntries = normalizedEntries.filter((e) =>
-      e.date.startsWith(selectedMonth),
-    );
-
-    // Only interns with at least one entry
-    const activeEstagiarios = parsedEstagiariosData
+  // Monthly Ranking List (Sorted descending by total productivity in the selected month)
+  const monthlyRankingList = useMemo(() => {
+    return parsedEstagiariosData
       .filter((e) => e.totalAnalyzed > 0)
-      .map((e) => ({ id: e.id, name: e.name }));
-
-    const [y, m] = selectedMonth.split("-");
-    const year = parseInt(y, 10);
-    const month = parseInt(m, 10);
-    const daysInMonth = new Date(year, month, 0).getDate();
-
-    // week number -> { estagiarioId: count }
-    const weeklyMap: Record<number, Record<string, number>> = {};
-    for (let d = 1; d <= daysInMonth; d++) {
-      const w = Math.ceil(d / 7);
-      if (!weeklyMap[w]) weeklyMap[w] = {};
-    }
-
-    for (const e of filteredEntries) {
-      const day = parseInt(e.date.split("-")[2], 10);
-      const w = Math.ceil(day / 7);
-      if (!weeklyMap[w]) weeklyMap[w] = {};
-      weeklyMap[w][e.estagiarioId] = (weeklyMap[w][e.estagiarioId] || 0) + e.count;
-    }
-
-    return Object.entries(weeklyMap)
-      .sort(([a], [b]) => parseInt(a) - parseInt(b))
-      .map(([week, interns]) => {
-        const entry: Record<string, string | number> = { week: `Semana ${week}` };
-        activeEstagiarios.forEach((est) => {
-          entry[est.name] = interns[est.id] || 0;
-        });
-        return entry;
-      });
-  }, [normalizedEntries, selectedMonth, parsedEstagiariosData]);
+      .sort((a, b) => b.totalAnalyzed - a.totalAnalyzed)
+      .map((est, index) => ({
+        id: est.id,
+        name: est.name,
+        count: est.totalAnalyzed,
+        rank: index + 1,
+      }));
+  }, [parsedEstagiariosData]);
 
   // Distribution by Process Type — carrega dos processos detalhados salvos nas settings
   const distributionChartData = useMemo(() => {
@@ -3558,9 +3593,9 @@ export default function App() {
                   className="flex flex-col gap-6"
                 >
                   {/* Charts Row */}
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1.6fr_0.8fr] gap-6">
                     {/* Daily Productivity Bar/Line Chart */}
-                    <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+                    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col justify-between">
                       <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
                         <TrendingUp className="w-4 h-4 text-indigo-500" />
                         PRODUTIVIDADE DIÁRIA (
@@ -3633,7 +3668,7 @@ export default function App() {
                     </div>
 
                     {/* Distribution Pie Chart */}
-                    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col">
+                    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col justify-between">
                       <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
                         <Grid className="w-4 h-4 text-emerald-500" />
                         DISTRIBUIÇÃO POR CATEGORIA
@@ -3696,75 +3731,37 @@ export default function App() {
                         ))}
                       </div>
                     </div>
-                  </div>
 
-                  {/* Weekly Ranking Chart */}
-                  {weeklyRankingData.length > 0 && (
-                    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
-                      <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
-                        <Award className="w-4 h-4 text-amber-500" />
-                        RANKING SEMANAL POR ESTAGIÁRIO (
-                        {selectedMonth.split("-").reverse().join("/")})
+                    {/* Monthly Ranking List */}
+                    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4 flex flex-col justify-start h-[348px] gap-2">
+                      <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
+                        <Award className="w-4 h-4 text-indigo-500" />
+                        RANKING DO MÊS
                       </h2>
-                      <div className="h-[350px] w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart
-                            data={weeklyRankingData}
-                            margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
-                          >
-                            <CartesianGrid
-                              strokeDasharray="3 3"
-                              vertical={false}
-                              stroke="#e2e8f0"
-                            />
-                            <XAxis
-                              dataKey="week"
-                              axisLine={false}
-                              tickLine={false}
-                              tick={{ fontSize: 11, fill: "#64748b" }}
-                              dy={10}
-                            />
-                            <YAxis
-                              axisLine={false}
-                              tickLine={false}
-                              tick={{ fontSize: 10, fill: "#64748b" }}
-                            />
-                            <Tooltip
-                              cursor={{ fill: "#f1f5f9" }}
-                              contentStyle={{
-                                borderRadius: "8px",
-                                border: "none",
-                                boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
-                              }}
-                              labelStyle={{
-                                fontWeight: "bold",
-                                color: "#0f172a",
-                              }}
-                            />
-                            <Legend
-                              wrapperStyle={{
-                                fontSize: "10px",
-                                fontWeight: 600,
-                                paddingTop: "8px",
-                              }}
-                            />
-                            {weeklyRankingData.length > 0 &&
-                              Object.keys(weeklyRankingData[0])
-                                .filter((k) => k !== "week")
-                                .map((name, i) => (
-                                  <Bar
-                                    key={name}
-                                    dataKey={name}
-                                    fill={INTERN_COLORS[i % INTERN_COLORS.length]}
-                                    radius={[3, 3, 0, 0]}
-                                    maxBarSize={24}
-                                  />
-                                ))}
-                          </BarChart>
-                        </ResponsiveContainer>
+                      <div className="overflow-y-auto pr-1 space-y-0.5 max-h-[285px]">
+                        {monthlyRankingList.length === 0 ? (
+                          <p className="text-xs text-slate-400 text-center py-10 font-medium">Nenhum dado registrado este mês.</p>
+                        ) : (
+                          monthlyRankingList.map((est, rankIdx) => (
+                            <div key={est.id} className="flex items-center gap-3 text-xs py-0.5 border-b border-slate-50 last:border-0">
+                              <div className="flex items-center gap-2 w-36 shrink-0">
+                                <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black ${
+                                  rankIdx === 0 ? "bg-amber-150 text-amber-800 border border-amber-250" :
+                                  rankIdx === 1 ? "bg-slate-150 text-slate-800 border border-slate-250" :
+                                  rankIdx === 2 ? "bg-orange-150 text-orange-850 border border-orange-250" :
+                                  "bg-slate-50 text-slate-500 border border-slate-250"
+                                }`}>
+                                  {est.rank}
+                                </span>
+                                <span className="font-semibold text-slate-700 truncate">{est.name}</span>
+                              </div>
+                              <span className="font-mono font-bold text-slate-900">{est.count} proc.</span>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </div>
-                  )}
+                  </div>
 
                   {/* Detalhe do Dia Selecionado List */}
                   <div className="bg-white border text-center border-indigo-200 rounded-xl shadow-sm overflow-hidden mb-0">

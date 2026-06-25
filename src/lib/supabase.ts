@@ -174,7 +174,7 @@ export const fetchSheetDataDirectly = async (url: string, token: string): Promis
     const sheetsResultMap: Record<string, string> = {}
 
     const rangesQuery = sheetsList
-        .map((sheet: any) => `ranges=${encodeURIComponent("'" + sheet.properties.title + "'!A1:BZ2500")}`)
+        .map((sheet: any) => `ranges=${encodeURIComponent("'" + sheet.properties.title + "'!A1:ZZ2500")}`)
         .join("&")
 
     const batchRes = await fetchSheetsWithTimeout(
