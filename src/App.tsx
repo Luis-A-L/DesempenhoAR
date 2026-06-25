@@ -103,6 +103,7 @@ export default function App() {
       estagiarioId: string;
       date: string;
       count: number;
+      typeBreakdown: Record<string, number>;
     }> = {};
 
     entries.forEach((e) => {
@@ -115,9 +116,16 @@ export default function App() {
           estagiarioId: e.estagiarioId,
           date: e.date,
           count: 0,
+          typeBreakdown: {},
         };
       }
       groups[key].count += e.count;
+
+      if (e.typeBreakdown) {
+        Object.entries(e.typeBreakdown).forEach(([type, count]) => {
+          groups[key].typeBreakdown[type] = (groups[key].typeBreakdown[type] || 0) + count;
+        });
+      }
     });
 
     return Object.values(groups) as Array<ProductivityEntry>;
