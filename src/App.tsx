@@ -970,8 +970,8 @@ export default function App() {
       debugRows = rows.slice(0, 10);
 
       // 3.0 Detectar formato DETALHADO ("Controle detalhado")
-      // Identifica por subcolunas de tipo como CV, RCV, DCV, CR, RCR, DCR
-      const DETAIL_TYPE_CODES = new Set(["cv", "rcv", "dcv", "cr", "rcr", "dcr"]);
+      // Identifica por subcolunas de tipo como CV, RCV, DCV, CR, RCR, DCR, REDCV, REDCR
+      const DETAIL_TYPE_CODES = new Set(["cv", "rcv", "dcv", "cr", "rcr", "dcr", "redcv", "redcr"]);
       let typesRowIdx = -1;
       let maxTypeCodeCount = -1;
       for (let i = 0; i < Math.min(15, rows.length); i++) {
@@ -2951,10 +2951,19 @@ export default function App() {
     
     // Sum counts and type breakdown per estagiario
     const countsMap: Record<string, number> = {};
+    const totalForPctMap: Record<string, number> = {};
     const typeBreakdownMap: Record<string, Record<string, number>> = {};
     
     weekEntries.forEach((e) => {
-      countsMap[e.estagiarioId] = (countsMap[e.estagiarioId] || 0) + e.count;
+      let redCount = 0;
+      if (e.typeBreakdown) {
+        redCount += (e.typeBreakdown["REDCV"] || 0);
+        redCount += (e.typeBreakdown["REDCR"] || 0);
+      }
+      
+      const entryProductivity = Math.max(0, e.count - redCount);
+      countsMap[e.estagiarioId] = (countsMap[e.estagiarioId] || 0) + entryProductivity;
+      totalForPctMap[e.estagiarioId] = (totalForPctMap[e.estagiarioId] || 0) + e.count;
       
       if (!typeBreakdownMap[e.estagiarioId]) {
         typeBreakdownMap[e.estagiarioId] = {};
@@ -2971,20 +2980,23 @@ export default function App() {
       CV: "🔵",
       RCV: "🔵",
       DCV: "🟡",
+      REDCV: "🔵",
       CR: "🟣",
       RCR: "🟣",
       DCR: "🔴",
+      REDCR: "🔴",
     };
     
     // Map to list and sort descending
     return estagiarios
       .map((est) => {
         const count = countsMap[est.id] || 0;
+        const totalForPct = totalForPctMap[est.id] || 0;
         const breakdownObj = typeBreakdownMap[est.id] || {};
         
         const breakdown = Object.entries(breakdownObj)
           .map(([type, val]) => {
-            const pct = count > 0 ? Math.round((val / count) * 100) : 0;
+            const pct = totalForPct > 0 ? Math.round((val / totalForPct) * 100) : 0;
             return {
               type,
               pct,
@@ -2999,9 +3011,10 @@ export default function App() {
           name: est.name,
           count,
           breakdown,
+          totalForPct,
         };
       })
-      .filter((e) => e.count > 0)
+      .filter((e) => e.count > 0 || e.totalForPct > 0)
       .sort((a, b) => b.count - a.count)
       .map((est, index) => ({
         ...est,
@@ -3945,7 +3958,7 @@ export default function App() {
                             }
                           });
 
-                          const order = ['CV','RCV','DCV','CR','RCR','DCR'];
+                          const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR'];
                           const sorted = Object.entries(teamBreakdown).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
                           if (sorted.length === 0) return null;
                           return (
@@ -4061,10 +4074,10 @@ export default function App() {
 
                                   if (Object.keys(breakdown).length === 0) return null;
                                   const ORIGEM_COLORS: Record<string, string> = {
-                                    CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa',
-                                    CR: '#7c3aed', RCR: '#8b5cf6', DCR: '#a78bfa',
+                                    CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa', REDCV: '#3b82f6',
+                                    CR: '#7c3aed', RCR: '#8b5cf6', DCR: '#a78bfa', REDCR: '#ef4444',
                                   };
-                                  const order = ['CV','RCV','DCV','CR','RCR','DCR'];
+                                  const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR'];
                                   const sorted = Object.entries(breakdown)
                                     .filter(([, v]) => Number(v) > 0)
                                     .sort(([a], [b]) => order.indexOf(a) - order.indexOf(b)) as [string, number][];

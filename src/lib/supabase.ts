@@ -22,34 +22,58 @@ const credentials = getSupabaseCredentials()
 
 export const isSupabaseConfigured = credentials !== null
 
+const createMockQueryBuilder = (resolvedValue: any): any => {
+  const chain: any = {
+    then: (onfulfilled?: any, onrejected?: any) => {
+      return Promise.resolve(resolvedValue).then(onfulfilled, onrejected);
+    },
+    catch: (onrejected?: any) => {
+      return Promise.resolve(resolvedValue).catch(onrejected);
+    },
+    finally: (onfinally?: any) => {
+      return Promise.resolve(resolvedValue).finally(onfinally);
+    }
+  };
+
+  const chainMethods = [
+    'select', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte',
+    'like', 'ilike', 'is', 'in', 'contains', 'containedBy',
+    'range', 'limit', 'order', 'insert', 'upsert', 'update', 'delete'
+  ];
+
+  chainMethods.forEach(method => {
+    chain[method] = () => chain;
+  });
+
+  chain.single = () => createMockQueryBuilder(
+    Array.isArray(resolvedValue?.data)
+      ? { data: resolvedValue.data[0] || null, error: null }
+      : resolvedValue
+  );
+  chain.maybeSingle = () => createMockQueryBuilder(
+    Array.isArray(resolvedValue?.data)
+      ? { data: resolvedValue.data[0] || null, error: null }
+      : resolvedValue
+  );
+
+  return chain;
+};
+
 export const supabase = isSupabaseConfigured
   ? createClient(credentials!.url, credentials!.key)
-    : ({
-            from: () => ({
-                      select: () => ({
-                          eq: () => Promise.resolve({ data: [], error: null }),
-                          range: () => ({
-                              eq: () => Promise.resolve({ data: [], error: null }),
-                          }),
-                          maybeSingle: () => Promise.resolve({ data: null, error: null }),
-                          single: () => Promise.resolve({ data: null, error: null }),
-                      }),
-                      insert: () => Promise.resolve({ data: null, error: null }),
-                      upsert: () => Promise.resolve({ data: null, error: null }),
-                      update: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
-                      delete: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
-            }),
-            auth: {
-                      getSession: () => Promise.resolve({ data: { session: null } }),
-                      onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
-                      signInWithOAuth: () => Promise.resolve({ data: null, error: null }),
-                      signOut: () => Promise.resolve({ error: null }),
-            },
-            channel: () => ({
-                      on: function() { return this },
-                      subscribe: () => {},
-            }),
-            removeChannel: () => {},
+  : ({
+      from: () => createMockQueryBuilder({ data: [], error: null }),
+      auth: {
+        getSession: () => Promise.resolve({ data: { session: null } }),
+        onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+        signInWithOAuth: () => Promise.resolve({ data: null, error: null }),
+        signOut: () => Promise.resolve({ error: null }),
+      },
+      channel: () => ({
+        on: function() { return this },
+        subscribe: () => {},
+      }),
+      removeChannel: () => {},
     } as any)
 
 // ==========================================
