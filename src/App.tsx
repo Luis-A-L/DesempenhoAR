@@ -2941,20 +2941,56 @@ export default function App() {
       (e) => e.date >= startStr && e.date <= endStr
     );
     
-    // Sum counts per estagiario
+    // Sum counts and type breakdown per estagiario
     const countsMap: Record<string, number> = {};
+    const typeBreakdownMap: Record<string, Record<string, number>> = {};
+    
     weekEntries.forEach((e) => {
       countsMap[e.estagiarioId] = (countsMap[e.estagiarioId] || 0) + e.count;
+      
+      if (!typeBreakdownMap[e.estagiarioId]) {
+        typeBreakdownMap[e.estagiarioId] = {};
+      }
+      
+      if (e.typeBreakdown) {
+        Object.entries(e.typeBreakdown).forEach(([type, count]) => {
+          typeBreakdownMap[e.estagiarioId][type] = (typeBreakdownMap[e.estagiarioId][type] || 0) + count;
+        });
+      }
     });
+
+    const emojiMap: Record<string, string> = {
+      CV: "🔵",
+      RCV: "🔵",
+      DCV: "🟡",
+      CR: "🟣",
+      RCR: "🟣",
+      DCR: "🔴",
+    };
     
     // Map to list and sort descending
     return estagiarios
       .map((est) => {
         const count = countsMap[est.id] || 0;
+        const breakdownObj = typeBreakdownMap[est.id] || {};
+        
+        const breakdown = Object.entries(breakdownObj)
+          .map(([type, val]) => {
+            const pct = count > 0 ? Math.round((val / count) * 100) : 0;
+            return {
+              type,
+              pct,
+              emoji: emojiMap[type] || "⚪"
+            };
+          })
+          .filter((b) => b.pct > 0)
+          .sort((a, b) => b.pct - a.pct);
+
         return {
           id: est.id,
           name: est.name,
           count,
+          breakdown,
         };
       })
       .filter((e) => e.count > 0)
@@ -3789,9 +3825,9 @@ export default function App() {
                           <p className="text-xs text-slate-400 text-center py-10 font-medium">Nenhum dado registrado esta semana.</p>
                         ) : (
                           weeklyRankingList.map((est, rankIdx) => (
-                            <div key={est.id} className="flex items-center gap-3 text-xs py-0.5 border-b border-slate-50 last:border-0">
-                              <div className="flex items-center gap-2 w-36 shrink-0">
-                                <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black ${
+                            <div key={est.id} className="flex items-center justify-between text-xs py-0.5 border-b border-slate-50 last:border-0">
+                              <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black shrink-0 ${
                                   rankIdx === 0 ? "bg-amber-150 text-amber-800 border border-amber-250" :
                                   rankIdx === 1 ? "bg-slate-150 text-slate-800 border border-slate-250" :
                                   rankIdx === 2 ? "bg-orange-150 text-orange-850 border border-orange-250" :
@@ -3799,9 +3835,20 @@ export default function App() {
                                 }`}>
                                   {est.rank}
                                 </span>
-                                <span className="font-semibold text-slate-700 truncate">{est.name}</span>
+                                <span className="font-semibold text-slate-700 truncate max-w-[70px] shrink-0">{est.name}</span>
+                                
+                                {/* Process breakdown legend */}
+                                {est.breakdown && est.breakdown.length > 0 && (
+                                  <div className="flex items-center gap-1 text-[9px] text-slate-500 font-medium overflow-hidden ml-1">
+                                    {est.breakdown.map((b) => (
+                                      <span key={b.type} className="whitespace-nowrap">
+                                        {b.emoji}{b.pct}% {b.type}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-                              <span className="font-mono font-bold text-slate-900">{est.count} proc.</span>
+                              <span className="font-mono font-bold text-slate-900 shrink-0 ml-2">{est.count} proc.</span>
                             </div>
                           ))
                         )}
