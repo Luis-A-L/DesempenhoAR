@@ -971,7 +971,7 @@ export default function App() {
 
       // 3.0 Detectar formato DETALHADO ("Controle detalhado")
       // Identifica por subcolunas de tipo como CV, RCV, DCV, CR, RCR, DCR, REDCV, REDCR
-      const DETAIL_TYPE_CODES = new Set(["cv", "rcv", "dcv", "cr", "rcr", "dcr", "redcv", "redcr"]);
+      const DETAIL_TYPE_CODES = new Set(["cv", "rcv", "dcv", "cr", "rcr", "dcr", "redcv", "redcr", "revcr"]);
       let typesRowIdx = -1;
       let maxTypeCodeCount = -1;
       for (let i = 0; i < Math.min(15, rows.length); i++) {
@@ -2959,6 +2959,7 @@ export default function App() {
       if (e.typeBreakdown) {
         redCount += (e.typeBreakdown["REDCV"] || 0);
         redCount += (e.typeBreakdown["REDCR"] || 0);
+        redCount += (e.typeBreakdown["REVCR"] || 0);
       }
       
       const entryProductivity = Math.max(0, e.count - redCount);
@@ -2980,6 +2981,8 @@ export default function App() {
             targetType = "DCV";
           } else if (type === "REDCR" || type === "DCR") {
             targetType = "REDCR";
+          } else if (type === "REVCR") {
+            targetType = "REVCR";
           }
           typeBreakdownMap[e.estagiarioId][targetType] = (typeBreakdownMap[e.estagiarioId][targetType] || 0) + Number(count);
         });
@@ -2991,6 +2994,7 @@ export default function App() {
       CR: "🟣",
       DCV: "🟡",
       REDCR: "🔴",
+      REVCR: "🔴",
     };
     
     // Map to list and sort descending
@@ -3012,7 +3016,7 @@ export default function App() {
           })
           .filter((b) => b.pct > 0);
 
-        const order = ["CV", "CR", "DCV", "REDCR"];
+        const order = ["CV", "CR", "DCV", "REDCV", "REDCR", "REVCR"];
         breakdown.sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type));
 
         return {
@@ -3053,6 +3057,7 @@ export default function App() {
       DCR: { label: "DCR", fill: "#a78bfa" }, // violet-400
       REDCV: { label: "REDCV", fill: "#ef4444" }, // red-500 (redistribuição cível)
       REDCR: { label: "REDCR", fill: "#dc2626" }, // red-600 (redistribuição crime)
+      REVCR: { label: "REVCR", fill: "#f87171" }, // red-400 (revisão crime)
     };
 
     const counts: Record<string, number> = {};
@@ -4007,7 +4012,7 @@ export default function App() {
                             }
                           });
 
-                          const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR'];
+                          const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR','REVCR'];
                           const sorted = Object.entries(teamBreakdown).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
                           if (sorted.length === 0) return null;
                           return (
@@ -4123,10 +4128,10 @@ export default function App() {
 
                                   if (Object.keys(breakdown).length === 0) return null;
                                   const ORIGEM_COLORS: Record<string, string> = {
-                                    CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa', REDCV: '#3b82f6',
-                                    CR: '#7c3aed', RCR: '#8b5cf6', DCR: '#a78bfa', REDCR: '#ef4444',
+                                    CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa', REDCV: '#ef4444',
+                                    CR: '#7c3aed', RCR: '#8b5cf6', DCR: '#a78bfa', REDCR: '#dc2626', REVCR: '#f87171',
                                   };
-                                  const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR'];
+                                  const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR','REVCR'];
                                   const sorted = Object.entries(breakdown)
                                     .filter(([, v]) => Number(v) > 0)
                                     .sort(([a], [b]) => order.indexOf(a) - order.indexOf(b)) as [string, number][];
