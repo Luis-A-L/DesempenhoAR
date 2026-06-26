@@ -393,7 +393,7 @@ export default function App() {
       setLoading(true);
 
       // 1. Carregar estagiários
-      const SKIP_IDS = new Set(["total", "livre_1", "pietro"]);
+      const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias"]);
       const estagiariosSnap = await getDocs(collection(db, "estagiarios"));
       const estagiariosList: Estagiario[] = [];
       estagiariosSnap.forEach((docSnap) => {
@@ -528,7 +528,7 @@ export default function App() {
     let diagFirstDateRaw = "";
     let diagFirstDateIso = "";
     let debugRows: string[][] = [];
-    const SKIP_IDS = new Set(["total", "livre_1", "pietro"]);
+    const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias"]);
 
     const normalizeText = (text: string) =>
       text
