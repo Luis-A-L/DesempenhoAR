@@ -96,7 +96,6 @@ export const getDocs = async (ref: CollectionRef | QueryRef): Promise<{
       hasMore = false
     }
   }
-
   const docs = rows.map((row: any) => ({
     id: row.id,
     data: () => {
@@ -138,13 +137,11 @@ export const getDoc = async (ref: DocRef): Promise<{
   // A tabela settings usa 'key' como PK, não 'id'
   const pkColumn = ref.table === 'settings' ? 'key' : 'id'
 
-  const { data: list, error } = await supabase
+  const { data, error } = await supabase
     .from(ref.table)
     .select('*')
     .eq(pkColumn, ref.id)
-    .limit(1)
-
-  const data = list?.[0]
+    .maybeSingle()
   if (error || !data) {
     return { exists: () => false, data: () => ({}) }
   }
@@ -229,12 +226,11 @@ export const addDoc = async (collRef: CollectionRef, data: any): Promise<{ id: s
 
 export const updateDoc = async (ref: DocRef, data: any): Promise<void> => {
   if (ref.table === 'settings') {
-    const { data: list } = await supabase
+    const { data: existing } = await supabase
       .from('settings')
       .select('value')
       .eq('key', ref.id)
-      .limit(1)
-    const existing = list?.[0]
+      .maybeSingle()
     const merged = { ...(existing?.value ?? {}), ...data }
     const { error } = await supabase
       .from('settings')

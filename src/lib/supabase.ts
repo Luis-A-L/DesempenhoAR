@@ -26,47 +26,41 @@ const credentials = getSupabaseCredentials()
 
 export const isSupabaseConfigured = credentials !== null
 
-const createMockQueryBuilder = (resolvedValue: any): any => {
-  const chain: any = {
-    then: (onfulfilled?: any, onrejected?: any) => {
-      return Promise.resolve(resolvedValue).then(onfulfilled, onrejected);
-    },
-    catch: (onrejected?: any) => {
-      return Promise.resolve(resolvedValue).catch(onrejected);
-    },
-    finally: (onfinally?: any) => {
-      return Promise.resolve(resolvedValue).finally(onfinally);
-    }
-  };
-
-  const chainMethods = [
-    'select', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte',
-    'like', 'ilike', 'is', 'in', 'contains', 'containedBy',
-    'range', 'limit', 'order', 'insert', 'upsert', 'update', 'delete'
-  ];
-
-  chainMethods.forEach(method => {
-    chain[method] = () => chain;
-  });
-
-  chain.single = () => createMockQueryBuilder(
-    Array.isArray(resolvedValue?.data)
-      ? { data: resolvedValue.data[0] || null, error: null }
-      : resolvedValue
-  );
-  chain.maybeSingle = () => createMockQueryBuilder(
-    Array.isArray(resolvedValue?.data)
-      ? { data: resolvedValue.data[0] || null, error: null }
-      : resolvedValue
-  );
-
-  return chain;
-};
-
 export const supabase = isSupabaseConfigured
   ? createClient(credentials!.url, credentials!.key)
   : ({
-      from: () => createMockQueryBuilder({ data: [], error: null }),
+      from: () => {
+        const chain = <T = any>(data: T[] = [], error: any = null) => {
+          const result = { data, error }
+          const thenable = Promise.resolve(result)
+          return {
+            eq: () => chain(data, error),
+            neq: () => chain(data, error),
+            gt: () => chain(data, error),
+            gte: () => chain(data, error),
+            lt: () => chain(data, error),
+            lte: () => chain(data, error),
+            like: () => chain(data, error),
+            ilike: () => chain(data, error),
+            is: () => chain(data, error),
+            in: () => chain(data, error),
+            contains: () => chain(data, error),
+            range: () => chain(data, error),
+            maybeSingle: () => Promise.resolve({ data: data[0] ?? null, error }),
+            single: () => Promise.resolve({ data: data[0] ?? null, error }),
+            then: thenable.then.bind(thenable),
+            catch: thenable.catch.bind(thenable),
+            finally: thenable.finally.bind(thenable),
+          }
+        }
+        return {
+          select: () => chain<any[]>([]),
+          insert: (vals: any) => Promise.resolve({ data: vals ?? null, error: null }),
+          upsert: (vals: any) => Promise.resolve({ data: vals ?? null, error: null }),
+          update: () => chain<any>(null),
+          delete: () => chain<any>(null),
+        }
+      },
       auth: {
         getSession: () => Promise.resolve({ data: { session: null } }),
         onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),

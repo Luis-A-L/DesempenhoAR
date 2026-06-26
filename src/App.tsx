@@ -3041,6 +3041,26 @@ export default function App() {
     return `${pad(startOfWeek.getDate())}/${pad(startOfWeek.getMonth() + 1)} a ${pad(endOfWeek.getDate())}/${pad(endOfWeek.getMonth() + 1)}`;
   }, [selectedDetailDate]);
 
+  // Ranking mensal por estagiário (lista simples)
+  const monthlyRanking = useMemo(() => {
+    const filteredEntries = normalizedEntries.filter((e) =>
+      e.date.startsWith(selectedMonth),
+    );
+
+    const countMap = new Map<string, number>();
+
+    for (const e of filteredEntries) {
+      const est = parsedEstagiariosData.find((s) => s.id === e.estagiarioId);
+      if (!est) continue;
+      const name = est.name || e.estagiarioId;
+      countMap.set(name, (countMap.get(name) || 0) + e.count);
+    }
+
+    return Array.from(countMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [normalizedEntries, selectedMonth, parsedEstagiariosData]);
+
   // Distribution by Process Type — carrega dos processos detalhados salvos nas settings
   const distributionChartData = useMemo(() => {
     // Tipos de processo e suas cores premium
@@ -3924,6 +3944,46 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Ranking Mensal (Lista) */}
+                  {monthlyRanking.length > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+                      <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
+                        <Award className="w-4 h-4 text-amber-500" />
+                        RANKING MENSAL (
+                        {selectedMonth.split("-").reverse().join("/")})
+                      </h2>
+                      <div className="space-y-1">
+                        {monthlyRanking.map((item, i) => (
+                          <div
+                            key={item.name}
+                            className="flex items-center justify-between px-3 py-2 rounded-lg text-sm"
+                            style={{
+                              backgroundColor:
+                                i === 0
+                                  ? "#fef3c7"
+                                  : i === 1
+                                  ? "#f1f5f9"
+                                  : i === 2
+                                  ? "#fef2f2"
+                                  : "transparent",
+                            }}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-slate-400 w-5 text-right">
+                                {i + 1}º
+                              </span>
+                              <span className="font-medium text-slate-800">
+                                {item.name}
+                              </span>
+                            </div>
+                            <span className="font-bold text-indigo-600">
+                              {item.count}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {/* Detalhe do Dia Selecionado List */}
                   <div className="bg-white border text-center border-indigo-200 rounded-xl shadow-sm overflow-hidden mb-0">
                     <div className="p-4 bg-indigo-50 border-b border-indigo-100 flex flex-col sm:flex-row items-center justify-between gap-3">
