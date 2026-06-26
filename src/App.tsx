@@ -3051,6 +3051,8 @@ export default function App() {
       CR:  { label: "CR",  fill: "#7c3aed" }, // violet-600 (crime)
       RCR: { label: "RCR", fill: "#8b5cf6" }, // violet-500
       DCR: { label: "DCR", fill: "#a78bfa" }, // violet-400
+      REDCV: { label: "REDCV", fill: "#ef4444" }, // red-500 (redistribuição cível)
+      REDCR: { label: "REDCR", fill: "#dc2626" }, // red-600 (redistribuição crime)
     };
 
     const counts: Record<string, number> = {};
