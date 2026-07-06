@@ -4053,6 +4053,7 @@ export default function App() {
                         )}
                       </div>
                     </div>
+                  </div>
 
                   {/* Detalhe do Dia Selecionado List */}
                   <div className="bg-white border text-center border-indigo-200 rounded-xl shadow-sm overflow-hidden mb-0">
