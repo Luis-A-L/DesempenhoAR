@@ -4,7 +4,7 @@
  * Antes era um conjunto de stubs vazios simulando Firebase.
  * Agora implementa todas as funções usando Supabase como backend real.
  */
-import { supabase, signInWithGoogle as _signInWithGoogle, signOut as _signOut, getGoogleAccessToken } from './supabase'
+import { supabase, signInWithGoogle as _signInWithGoogle, signInWithGooglePopup as _signInWithGooglePopup, signOut as _signOut, getGoogleAccessToken } from './supabase'
 import type { Estagiario, ProductivityEntry } from './types'
 
 // =====================================================
@@ -62,25 +62,40 @@ export const getDocs = async (ref: CollectionRef | QueryRef): Promise<{
   const table = (ref as any).table
   const filters = (ref as QueryRef).filters || []
 
-  let q = supabase.from(table).select('*')
-  if (table === 'productivity_entries') {
-    // PostgREST limita por padrão a 1000 registros. Expandimos para até 10000 linhas.
-    q = q.range(0, 9999) as any
-  }
-  for (const f of filters) {
-    if (f?.column && f?.value !== undefined) {
-      q = q.eq(f.column, f.value) as any
+  const rows: any[] = []
+  let hasMore = true
+  let offset = 0
+  const limit = 1000
+
+  while (hasMore) {
+    let q = supabase.from(table).select('*')
+    if (table === 'productivity_entries') {
+      q = q.range(offset, offset + limit - 1) as any
+    }
+    for (const f of filters) {
+      if (f?.column && f?.value !== undefined) {
+        q = q.eq(f.column, f.value) as any
+      }
+    }
+
+    const { data, error } = await q
+
+    if (error) {
+      console.error(`Erro ao buscar ${table}:`, error)
+      return { docs: [], forEach: () => {}, empty: true }
+    }
+
+    if (data && data.length > 0) {
+      rows.push(...data)
+      if (table === 'productivity_entries' && data.length === limit) {
+        offset += limit
+      } else {
+        hasMore = false
+      }
+    } else {
+      hasMore = false
     }
   }
-
-  const { data, error } = await q
-
-  if (error) {
-    console.error(`Erro ao buscar ${table}:`, error)
-    return { docs: [], forEach: () => {}, empty: true }
-  }
-
-  const rows = data ?? []
   const docs = rows.map((row: any) => ({
     id: row.id,
     data: () => {
@@ -126,9 +141,7 @@ export const getDoc = async (ref: DocRef): Promise<{
     .from(ref.table)
     .select('*')
     .eq(pkColumn, ref.id)
-    .limit(1)
-
-  const data = list?.[0]
+    .maybeSingle()
   if (error || !data) {
     return { exists: () => false, data: () => ({}) }
   }
@@ -318,6 +331,10 @@ export const batchUpsertEntries = async (items: Omit<ProductivityEntry, 'id'>[])
 export const googleSignIn = async (): Promise<{ user: any; accessToken: string } | null> => {
   await _signInWithGoogle()
   return null // redirect flow — a sessão é recuperada no retorno
+}
+
+export const googleSignInPopup = async (): Promise<Window | null> => {
+  return _signInWithGooglePopup()
 }
 
 export const logout = async (): Promise<void> => {

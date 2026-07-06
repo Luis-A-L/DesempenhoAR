@@ -13,6 +13,7 @@ import {
   query,
   where,
   googleSignIn,
+  googleSignInPopup,
   logout,
   initAuth,
   getAccessToken,
@@ -123,7 +124,7 @@ export default function App() {
 
       if (e.typeBreakdown) {
         Object.entries(e.typeBreakdown).forEach(([type, count]) => {
-          groups[key].typeBreakdown[type] = (groups[key].typeBreakdown[type] || 0) + count;
+          groups[key].typeBreakdown[type] = (groups[key].typeBreakdown[type] || 0) + Number(count);
         });
       }
     });
@@ -285,12 +286,20 @@ export default function App() {
   const [googleToken, setGoogleToken] = useState<string | null>(null);
   const [isLoggingInGoogle, setIsLoggingInGoogle] = useState<boolean>(false);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
+  const [googleTokenExpired, setGoogleTokenExpired] = useState<boolean>(false);
   const [hasAutoSyncedOnStartup, setHasAutoSyncedOnStartup] =
     useState<boolean>(false);
   const [hasSpreadsheetAccess, setHasSpreadsheetAccess] = useState<
     boolean | null
   >(null);
   const [selectedDetailDate, setSelectedDetailDate] = useState<string>(getCurrentDate());
+
+  // Wake Lock states
+  const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
+  const [wakeLockEnabled, setWakeLockEnabled] = useState<boolean>(
+    localStorage.getItem("wakeLockEnabled") !== "false"
+  );
+  const wakeLockRef = React.useRef<any>(null);
 
   // Notifications
   const previousTodayCounts = React.useRef<Record<string, number>>({});
@@ -307,6 +316,7 @@ export default function App() {
       (user, token) => {
         setGoogleUser(user);
         setGoogleToken(token);
+        setGoogleTokenExpired(false); // Reseta o estado expirado após login com sucesso
         setIsAuthLoading(false);
       },
       () => {
@@ -324,15 +334,9 @@ export default function App() {
   const handleGoogleLogin = async () => {
     setIsLoggingInGoogle(true);
     try {
-      const result = await googleSignIn();
-      if (result) {
-        setGoogleUser(result.user);
-        setGoogleToken(result.accessToken);
-        // If there's an existing URL, sync it instantly!
-        if (spreadsheetUrl) {
-          triggerSheetsSync(spreadsheetUrl, estagiarios);
-        }
-      }
+      // Abre o fluxo de login em um popup para não recarregar a janela principal do sistema
+      await googleSignInPopup();
+      setGoogleTokenExpired(false);
     } catch (err: any) {
       console.error(err);
       alert(
@@ -356,6 +360,75 @@ export default function App() {
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Fechamento automático do popup de login se a janela atual foi aberta via popup de callback do Supabase
+  useEffect(() => {
+    const isCallbackPopup = window.opener && (window.location.hash.includes("access_token") || window.location.search.includes("code"));
+    if (isCallbackPopup) {
+      console.log("Detectado fluxo de callback no popup. Salvando sessão e fechando em 1 segundo...");
+      setTimeout(() => {
+        window.close();
+      }, 1000);
+    }
+  }, []);
+
+  // Screen Wake Lock API para prevenir que o computador entre em modo repouso
+  const requestWakeLock = async () => {
+    if (!wakeLockEnabled || !('wakeLock' in navigator)) {
+      setWakeLockActive(false);
+      return;
+    }
+    try {
+      if (wakeLockRef.current) {
+        return; // Já está ativo
+      }
+      const lock = await navigator.wakeLock.request('screen');
+      wakeLockRef.current = lock;
+      setWakeLockActive(true);
+      console.log('Wake Lock ativo: a tela não irá desligar.');
+      
+      lock.addEventListener('release', () => {
+        console.log('Wake Lock liberado.');
+        wakeLockRef.current = null;
+        setWakeLockActive(false);
+      });
+    } catch (err: any) {
+      console.error(`Falha ao ativar Wake Lock: ${err.message}`);
+      setWakeLockActive(false);
+    }
+  };
+
+  const releaseWakeLock = async () => {
+    if (wakeLockRef.current) {
+      try {
+        await wakeLockRef.current.release();
+      } catch (err) {
+        console.error("Erro ao liberar Wake Lock:", err);
+      }
+      wakeLockRef.current = null;
+    }
+    setWakeLockActive(false);
+  };
+
+  useEffect(() => {
+    if (wakeLockEnabled) {
+      requestWakeLock();
+    } else {
+      releaseWakeLock();
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && wakeLockEnabled) {
+        requestWakeLock();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      releaseWakeLock();
+    };
+  }, [wakeLockEnabled]);
 
   // Update selectedDetailDate when selectedMonth changes
   useEffect(() => {
@@ -393,7 +466,7 @@ export default function App() {
       setLoading(true);
 
       // 1. Carregar estagiários
-      const SKIP_IDS = new Set(["total", "livre_1", "pietro"]);
+      const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias"]);
       const estagiariosSnap = await getDocs(collection(db, "estagiarios"));
       const estagiariosList: Estagiario[] = [];
       estagiariosSnap.forEach((docSnap) => {
@@ -528,7 +601,7 @@ export default function App() {
     let diagFirstDateRaw = "";
     let diagFirstDateIso = "";
     let debugRows: string[][] = [];
-    const SKIP_IDS = new Set(["total", "livre_1", "pietro"]);
+    const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias"]);
 
     const normalizeText = (text: string) =>
       text
@@ -969,14 +1042,20 @@ export default function App() {
 
       debugRows = rows.slice(0, 10);
 
+      const normalizeTypeCode = (code: string): string => {
+        return (code || "")
+          .replace(/[^a-zA-Z]/g, "")
+          .toUpperCase();
+      };
+
       // 3.0 Detectar formato DETALHADO ("Controle detalhado")
-      // Identifica por subcolunas de tipo como CV, RCV, DCV, CR, RCR, DCR, REDCV, REDCR
-      const DETAIL_TYPE_CODES = new Set(["cv", "rcv", "dcv", "cr", "rcr", "dcr", "redcv", "redcr"]);
+      // Identifica por subcolunas de tipo como CV, RCV, DCV, CR, RCR, DCR, REDCV, REDCR, REVCR
+      const DETAIL_TYPE_CODES = new Set(["CV", "RCV", "DCV", "CR", "RCR", "DCR", "REDCV", "REDCR", "REVCR"]);
       let typesRowIdx = -1;
       let maxTypeCodeCount = -1;
       for (let i = 0; i < Math.min(15, rows.length); i++) {
         const typeCodeCount = rows[i].filter(
-          (c) => DETAIL_TYPE_CODES.has((c || "").toLowerCase().trim())
+          (c) => DETAIL_TYPE_CODES.has(normalizeTypeCode(c || ""))
         ).length;
         if (typeCodeCount >= 3 && typeCodeCount > maxTypeCodeCount) {
           maxTypeCodeCount = typeCodeCount;
@@ -997,7 +1076,7 @@ export default function App() {
           const row = rows[r];
           const textCellCount = row.filter((c) => {
             const trimmed = (c || "").trim();
-            return trimmed && !/^\d+(\.\d+)?%?$/.test(trimmed) && !DETAIL_TYPE_CODES.has(trimmed.toLowerCase());
+            return trimmed && !/^\d+(\.\d+)?%?$/.test(trimmed) && !DETAIL_TYPE_CODES.has(normalizeTypeCode(trimmed));
           }).length;
           if (textCellCount >= 3) {
             namesRowIdx = r;
@@ -1015,7 +1094,7 @@ export default function App() {
         for (let c = 0; c < totalCols; c++) {
           const cell = (namesRow[c] || "").trim();
           // Atualiza nome corrente se a célula tem conteúdo e não é número puro (total) nem código de tipo
-          if (cell && !/^\d+(\.\d+)?%?$/.test(cell) && !DETAIL_TYPE_CODES.has(cell.toLowerCase())) {
+          if (cell && !/^\d+(\.\d+)?%?$/.test(cell) && !DETAIL_TYPE_CODES.has(normalizeTypeCode(cell))) {
             currentUserName = cell;
           }
           colUserMap[c] = currentUserName;
@@ -1044,12 +1123,18 @@ export default function App() {
 
         // Mapear usuário -> lista de índices de colunas das subcolunas
         const userColsMap: { [userId: string]: { name: string; cols: number[] } } = {};
+        console.log(`[DEBUG] Tipos detectados na aba "${cName}":`, typesRow.filter(c => {
+          const norm = normalizeTypeCode(c || "");
+          return norm && DETAIL_TYPE_CODES.has(norm);
+        }).join(", "));
+        console.log(`[DEBUG] Todos os cabeçalhos da linha de tipos:`, typesRow);
         for (let c = 0; c < typesRow.length; c++) {
           if (c === dateColIdx) continue; // Ignorar explicitamente a coluna de data para evitar parsing indevido
           const typeCode = (typesRow[c] || "").trim();
+          const typeCodeNorm = normalizeTypeCode(typeCode);
           const userName = colUserMap[c] || "";
           // Só processa colunas que são códigos de tipo conhecidos E têm nome de usuário
-          if (!typeCode || !DETAIL_TYPE_CODES.has(typeCode.toLowerCase())) continue;
+          if (!typeCode || !DETAIL_TYPE_CODES.has(typeCodeNorm)) continue;
           if (!userName) continue;
 
           let userId = findEstagiarioIdLocal(userName);
@@ -1104,8 +1189,8 @@ export default function App() {
                 if (!isNaN(num) && num > 0) {
                   total += num;
 
-                  // Acumular por tipo (CV, RCV, DCV, CR, RCR, DCR)
-                  const typeCode = (typesRow[colIdx] || "").trim().toUpperCase();
+                  // Acumular por tipo (CV, RCV, DCV, CR, RCR, DCR, REDCV, REDCR, REVCR)
+                  const typeCode = normalizeTypeCode(typesRow[colIdx] || "");
                   if (typeCode) {
                     typeBreakdown[typeCode] = (typeBreakdown[typeCode] || 0) + num;
                   }
@@ -1532,10 +1617,7 @@ export default function App() {
     setSheetSyncError("");
 
     try {
-      const activeToken = (await getAccessToken()) || googleToken;
-      if (!activeToken) {
-        throw new Error("Token de acesso não disponível. Faça login novamente.");
-      }
+      const activeToken = (await getAccessToken()) || googleToken || null;
 
       const resData = await fetchSheetDataDirectly(urlStr, activeToken);
       const parseResult = parseSheetData(
@@ -1615,18 +1697,13 @@ export default function App() {
       const isQuotaError = err.status === 429 || (err.message && err.message.toLowerCase().includes("quota"));
       if (err.status === 401 || err.status === 403) {
         setHasSpreadsheetAccess(false);
-        // Se for erro de sessão expirada / token inválido (401), tentamos reautenticar de forma automatizada
         if (err.status === 401) {
-          const lastAutoAuthStr = sessionStorage.getItem("last_auto_reauth_time");
-          const now = Date.now();
-          const delay = 15000; // 15 segundos de cooldown
-          
-          if (!lastAutoAuthStr || now - parseInt(lastAutoAuthStr, 10) > delay) {
-            sessionStorage.setItem("last_auto_reauth_time", now.toString());
-            console.warn("Detectado token do Google expirado (401). Iniciando reautenticação automática...");
-            googleSignIn();
-            return;
+          setGoogleTokenExpired(true);
+          console.warn("Detectado token do Google expirado ou ausente (401).");
+          if (showFeedback) {
+            handleGoogleLogin();
           }
+          return;
         }
       } else if (!isQuotaError && !hasSpreadsheetAccess && hasSpreadsheetAccess !== null) {
         // Leave it false if it was already false, but if it's 429, don't force it to false
@@ -1987,7 +2064,9 @@ export default function App() {
         const existing = entriesRef.current.find(
           (e) => e.estagiarioId === entry.estagiarioId && e.date === entry.date
         );
-        if (!existing || existing.count !== entry.count) {
+        const existingBStr = JSON.stringify(existing?.typeBreakdown || {});
+        const entryBStr = JSON.stringify(entry.typeBreakdown || {});
+        if (!existing || existing.count !== entry.count || existingBStr !== entryBStr) {
           entriesToUpsert.push(entry);
         }
       });
@@ -2005,7 +2084,7 @@ export default function App() {
             );
             if (idx !== -1) {
               // Mantém o ID original do banco para consistência
-              next[idx] = { ...next[idx], count: newEntry.count };
+              next[idx] = { ...next[idx], count: newEntry.count, typeBreakdown: newEntry.typeBreakdown };
             } else {
               // Adiciona temporariamente sem ID (o Realtime Socket atualizará o ID definitivo do banco logo em seguida)
               next.push({
@@ -2959,6 +3038,7 @@ export default function App() {
       if (e.typeBreakdown) {
         redCount += (e.typeBreakdown["REDCV"] || 0);
         redCount += (e.typeBreakdown["REDCR"] || 0);
+        redCount += (e.typeBreakdown["REVCR"] || 0);
       }
       
       const entryProductivity = Math.max(0, e.count - redCount);
@@ -2971,7 +3051,8 @@ export default function App() {
       
       if (e.typeBreakdown) {
         Object.entries(e.typeBreakdown).forEach(([type, count]) => {
-          typeBreakdownMap[e.estagiarioId][type] = (typeBreakdownMap[e.estagiarioId][type] || 0) + count;
+          const targetType = type.toUpperCase();
+          typeBreakdownMap[e.estagiarioId][targetType] = (typeBreakdownMap[e.estagiarioId][targetType] || 0) + Number(count);
         });
       }
     });
@@ -2980,38 +3061,42 @@ export default function App() {
       CV: "🔵",
       RCV: "🔵",
       DCV: "🟡",
-      REDCV: "🔵",
       CR: "🟣",
       RCR: "🟣",
       DCR: "🔴",
+      REDCV: "🔴",
       REDCR: "🔴",
+      REVCR: "🔴",
     };
     
     // Map to list and sort descending
     return estagiarios
       .map((est) => {
         const count = countsMap[est.id] || 0;
-        const totalForPct = totalForPctMap[est.id] || 0;
         const breakdownObj = typeBreakdownMap[est.id] || {};
+        
+        const estagiarioTotalBreakdown = Object.values(breakdownObj).reduce((sum, val) => sum + val, 0);
         
         const breakdown = Object.entries(breakdownObj)
           .map(([type, val]) => {
-            const pct = totalForPct > 0 ? Math.round((val / totalForPct) * 100) : 0;
+            const pct = estagiarioTotalBreakdown > 0 ? Math.round((val / estagiarioTotalBreakdown) * 100) : 0;
             return {
               type,
               pct,
               emoji: emojiMap[type] || "⚪"
             };
           })
-          .filter((b) => b.pct > 0)
-          .sort((a, b) => b.pct - a.pct);
+          .filter((b) => b.pct > 0);
+
+        const order = ["CV", "RCV", "DCV", "CR", "RCR", "DCR", "REDCV", "REDCR", "REVCR"];
+        breakdown.sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type));
 
         return {
           id: est.id,
           name: est.name,
           count,
           breakdown,
-          totalForPct,
+          totalForPct: estagiarioTotalBreakdown,
         };
       })
       .filter((e) => e.count > 0 || e.totalForPct > 0)
@@ -3042,20 +3127,25 @@ export default function App() {
       CR:  { label: "CR",  fill: "#7c3aed" }, // violet-600 (crime)
       RCR: { label: "RCR", fill: "#8b5cf6" }, // violet-500
       DCR: { label: "DCR", fill: "#a78bfa" }, // violet-400
+      REDCV: { label: "REDCV", fill: "#ef4444" }, // red-500 (redistribuição cível)
+      REDCR: { label: "REDCR", fill: "#dc2626" }, // red-600 (redistribuição crime)
+      REVCR: { label: "REVCR", fill: "#f87171" }, // red-400 (revisão crime)
     };
 
     const counts: Record<string, number> = {};
     Object.keys(PROCESS_TYPES).forEach(t => { counts[t] = 0; });
 
-    // Agrega de allDetailedProcesses para o mês selecionado
-    Object.values(allDetailedProcesses).forEach(procMap => {
-      Object.values(procMap).forEach((proc: any) => {
-        if (proc.date && proc.date.startsWith(selectedMonth) && proc.origem) {
-          const tipo = (proc.origem as string).toUpperCase();
-          if (counts[tipo] !== undefined) counts[tipo] += 1;
+    // Agrega de normalizedEntries (typeBreakdown) — única fonte
+    normalizedEntries
+      .filter((e) => e.date.startsWith(selectedMonth))
+      .forEach((e) => {
+        if (e.typeBreakdown) {
+          Object.entries(e.typeBreakdown).forEach(([tipo, qtd]) => {
+            const key = tipo.toUpperCase();
+            if (counts[key] !== undefined) counts[key] += Number(qtd);
+          });
         }
       });
-    });
 
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
 
@@ -3074,7 +3164,7 @@ export default function App() {
     return Object.entries(PROCESS_TYPES)
       .map(([key, meta]) => ({ name: meta.label, value: counts[key] || 0, fill: meta.fill }))
       .filter((x) => x.value > 0);
-  }, [parsedEstagiariosData, allDetailedProcesses, selectedMonth]);
+  }, [parsedEstagiariosData, selectedMonth, normalizedEntries]);
 
   // List of all active month entries sorted chronologically (newest first)
   const chronologicalEntries = useMemo(() => {
@@ -3365,6 +3455,28 @@ export default function App() {
               </p>
             </div>
 
+            {('wakeLock' in navigator) && (
+              <button
+                onClick={() => {
+                  const nextVal = !wakeLockEnabled;
+                  setWakeLockEnabled(nextVal);
+                  localStorage.setItem("wakeLockEnabled", String(nextVal));
+                  showToast(nextVal ? "Prevenção de suspensão ativada!" : "Prevenção de suspensão desativada.", nextVal ? "success" : "info");
+                }}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all border cursor-pointer select-none ${
+                  wakeLockActive 
+                    ? "bg-amber-50 border-amber-200 text-amber-700 shadow-sm" 
+                    : "bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-100"
+                }`}
+                title={wakeLockActive ? "Prevenção de Repouso Ativa (A tela não vai apagar)" : "Prevenção de Repouso Inativa (Clique para manter a tela sempre ligada)"}
+              >
+                <Zap className={`w-3.5 h-3.5 ${wakeLockActive ? "fill-amber-400 text-amber-500 animate-pulse" : ""}`} />
+                <span className="hidden sm:inline">
+                  {wakeLockActive ? "Tela: Sempre Ligada" : "Tela: Suspender (Padrão)"}
+                </span>
+              </button>
+            )}
+
             <div className="flex items-center gap-2">
               {googleUser ? (
                 <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1.5 pl-2">
@@ -3481,6 +3593,32 @@ export default function App() {
                     className="px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-900 rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer"
                   >
                     Reconectar Google
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Banner de Sessão Expirada do Google */}
+            {googleTokenExpired && (
+              <div className="bg-red-500/10 border border-red-500/30 text-red-900 p-4 rounded-xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shadow-sm animate-fade-in shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-red-500/20 text-red-700 flex items-center justify-center shrink-0">
+                    <HelpCircle className="w-5 h-5" />
+                  </div>
+                  <div className="text-left">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-red-800">Conexão do Google Expirada</h4>
+                    <p className="text-xs text-slate-600 mt-0.5 leading-normal">
+                      Sua sessão de acesso às planilhas do Google expirou por segurança. Reconecte para manter os dados atualizados.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                  <button
+                    onClick={handleGoogleLogin}
+                    disabled={isLoggingInGoogle}
+                    className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer"
+                  >
+                    {isLoggingInGoogle ? "Conectando..." : "Reconectar Google"}
                   </button>
                 </div>
               </div>
@@ -3696,7 +3834,7 @@ export default function App() {
                   className="flex flex-col gap-6"
                 >
                   {/* Charts Row */}
-                  <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1.6fr_0.8fr] gap-6">
+                  <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1.2fr_1.2fr] gap-6">
                     {/* Daily Productivity Bar/Line Chart */}
                     <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col justify-between">
                       <h2 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2 mb-4">
@@ -3783,11 +3921,13 @@ export default function App() {
                               data={distributionChartData}
                               cx="50%"
                               cy="50%"
-                              innerRadius={60}
-                              outerRadius={80}
+                              innerRadius={45}
+                              outerRadius={65}
                               paddingAngle={5}
                               dataKey="value"
                               stroke="none"
+                              label={({ percent }) => `${(percent * 100).toFixed(0)}%`}
+                              labelLine={true}
                             >
                               {distributionChartData.map((entry, index) => (
                                 <Cell key={`cell-${index}`} fill={entry.fill} />
@@ -3809,7 +3949,7 @@ export default function App() {
                         {/* Centered Total */}
                         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                           <span className="text-2xl font-light text-slate-800">
-                            {globalMetrics.totalAnalyzed}
+                            {distributionChartData.reduce((s, e) => s + e.value, 0)}
                           </span>
                           <span className="text-[10px] font-bold text-slate-400 uppercase">
                             Processos
@@ -3818,21 +3958,61 @@ export default function App() {
                       </div>
                       {/* Legend below */}
                       <div className="flex flex-wrap gap-3 justify-center mt-2">
-                        {distributionChartData.map((entry, index) => (
-                          <div
-                            key={index}
-                            className="flex items-center gap-1.5"
-                          >
-                            <div
-                              className="w-3 h-3 rounded-sm"
-                              style={{ backgroundColor: entry.fill }}
-                            ></div>
-                            <span className="text-[10px] font-semibold text-slate-600">
-                              {entry.name} ({entry.value})
-                            </span>
-                          </div>
-                        ))}
+                        {(() => {
+                          const distTotal = distributionChartData.reduce((s, e) => s + e.value, 0);
+                          return distributionChartData.map((entry, index) => {
+                            const pct = distTotal > 0 ? Math.round((entry.value / distTotal) * 100) : 0;
+                            return (
+                              <div key={index} className="flex items-center gap-1.5">
+                                <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: entry.fill }}></div>
+                                <span className="text-[10px] font-semibold text-slate-600">
+                                  {entry.name} {entry.value} ({pct}%)
+                                </span>
+                              </div>
+                            );
+                          });
+                        })()}
                       </div>
+                      {/* Role breakdown */}
+                      {(() => {
+                        const roleSums: Record<string, number> = {};
+                        parsedEstagiariosData.forEach((e) => {
+                          roleSums[e.role] = (roleSums[e.role] || 0) + (e.totalAnalyzed || 0);
+                        });
+                        const pos = roleSums["pos_graduacao"] || 0;
+                        const grad = roleSums["graduacao"] || 0;
+                        const total = pos + grad;
+                        if (total === 0) return null;
+                        const posPct = Math.round((pos / total) * 100);
+                        const gradPct = Math.round((grad / total) * 100);
+                        return (
+                          <div className="mt-3 pt-3 border-t border-slate-100">
+                            <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                              Por Equipe
+                            </h3>
+                            <div className="flex items-center gap-3">
+                              <div className="flex-1">
+                                <div className="flex justify-between text-[10px] mb-1">
+                                  <span className="font-semibold text-indigo-600">Pós-Graduação</span>
+                                  <span className="font-mono font-bold text-slate-700">{pos} ({posPct}%)</span>
+                                </div>
+                                <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                                  <div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${posPct}%` }}></div>
+                                </div>
+                              </div>
+                              <div className="flex-1">
+                                <div className="flex justify-between text-[10px] mb-1">
+                                  <span className="font-semibold text-sky-600">Graduação</span>
+                                  <span className="font-mono font-bold text-slate-700">{grad} ({gradPct}%)</span>
+                                </div>
+                                <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                                  <div className="h-full bg-sky-500 rounded-full transition-all" style={{ width: `${gradPct}%` }}></div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     {/* Weekly Ranking List */}
@@ -3846,7 +4026,7 @@ export default function App() {
                           <p className="text-xs text-slate-400 text-center py-10 font-medium">Nenhum dado registrado esta semana.</p>
                         ) : (
                           weeklyRankingList.map((est, rankIdx) => (
-                            <div key={est.id} className="flex items-center justify-between text-xs py-0.5 border-b border-slate-50 last:border-0">
+                            <div key={est.id} className="flex items-center justify-between text-xs py-1 border-b border-slate-50 last:border-0">
                               <div className="flex items-center gap-1.5 min-w-0 flex-1">
                                 <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black shrink-0 ${
                                   rankIdx === 0 ? "bg-amber-150 text-amber-800 border border-amber-250" :
@@ -3856,18 +4036,16 @@ export default function App() {
                                 }`}>
                                   {est.rank}
                                 </span>
-                                <span className="font-semibold text-slate-700 truncate max-w-[70px] shrink-0">{est.name}</span>
-                                
-                                {/* Process breakdown legend */}
-                                {est.breakdown && est.breakdown.length > 0 && (
-                                  <div className="flex items-center gap-1 text-[9px] text-slate-500 font-medium overflow-hidden ml-1">
+                                <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
+                                  <span className="font-semibold text-slate-700 shrink-0">{est.name}</span>
+                                  <div className="flex flex-wrap items-center gap-x-1.5 text-[10px] text-slate-500 font-medium select-none">
                                     {est.breakdown.map((b) => (
                                       <span key={b.type} className="whitespace-nowrap">
                                         {b.emoji}{b.pct}% {b.type}
                                       </span>
                                     ))}
                                   </div>
-                                )}
+                                </div>
                               </div>
                               <span className="font-mono font-bold text-slate-900 shrink-0 ml-2">{est.count} proc.</span>
                             </div>
@@ -3875,7 +4053,6 @@ export default function App() {
                         )}
                       </div>
                     </div>
-                  </div>
 
                   {/* Detalhe do Dia Selecionado List */}
                   <div className="bg-white border text-center border-indigo-200 rounded-xl shadow-sm overflow-hidden mb-0">
@@ -3958,7 +4135,7 @@ export default function App() {
                             }
                           });
 
-                          const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR'];
+                          const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR','REVCR'];
                           const sorted = Object.entries(teamBreakdown).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
                           if (sorted.length === 0) return null;
                           return (
@@ -4074,10 +4251,10 @@ export default function App() {
 
                                   if (Object.keys(breakdown).length === 0) return null;
                                   const ORIGEM_COLORS: Record<string, string> = {
-                                    CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa', REDCV: '#3b82f6',
-                                    CR: '#7c3aed', RCR: '#8b5cf6', DCR: '#a78bfa', REDCR: '#ef4444',
+                                    CV: '#2563eb', RCV: '#3b82f6', DCV: '#60a5fa', REDCV: '#ef4444',
+                                    CR: '#7c3aed', RCR: '#8b5cf6', DCR: '#a78bfa', REDCR: '#dc2626', REVCR: '#f87171',
                                   };
-                                  const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR'];
+                                  const order = ['CV','RCV','DCV','REDCV','CR','RCR','DCR','REDCR','REVCR'];
                                   const sorted = Object.entries(breakdown)
                                     .filter(([, v]) => Number(v) > 0)
                                     .sort(([a], [b]) => order.indexOf(a) - order.indexOf(b)) as [string, number][];
@@ -5661,6 +5838,37 @@ export default function App() {
                           </button>
                         </div>
                       </div>
+
+                      {('wakeLock' in navigator) && (
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-200">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              id="chk-wake-lock"
+                              checked={wakeLockEnabled}
+                              onChange={(e) => {
+                                const nextVal = e.target.checked;
+                                setWakeLockEnabled(nextVal);
+                                localStorage.setItem("wakeLockEnabled", String(nextVal));
+                                showToast(nextVal ? "Prevenção de repouso ativada!" : "Prevenção de repouso desativada.", nextVal ? "success" : "info");
+                              }}
+                              className="w-4 h-4 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500"
+                            />
+                            <label
+                              htmlFor="chk-wake-lock"
+                              className="text-xs font-bold text-slate-700 cursor-pointer"
+                            >
+                              Prevenir modo de repouso (impedir que o computador suspenda com a aba aberta)
+                            </label>
+                          </div>
+                          {wakeLockActive && (
+                            <span className="text-[10px] bg-amber-50 text-amber-700 border border-amber-200 font-bold px-2 py-0.5 rounded-full flex items-center gap-1 self-start sm:self-center shrink-0">
+                              <Zap className="w-2.5 h-2.5 fill-amber-400 text-amber-500 animate-pulse" />
+                              Prevenção Ativa
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 
