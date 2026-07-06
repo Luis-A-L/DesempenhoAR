@@ -240,8 +240,72 @@ export interface SheetFetchResult {
     csvText: string
 }
 
+// Fallback para ler a planilha diretamente via API oficial do Google v4 no frontend
+const fetchSheetDataFromGoogleAPI = async (url: string, token: string): Promise<SheetFetchResult> => {
+    const spreadsheetId = getSpreadsheetIdFromUrl(url)
+    if (!spreadsheetId) {
+        throw new Error("Formato do link do Google Planilhas inválido.")
+    }
+
+    const metaRes = await fetchSheetsWithTimeout(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        15000
+    )
+
+    if (!metaRes.ok) {
+        const errBody = await metaRes.json().catch(() => ({}))
+        const errMsg = errBody?.error?.message || `Erro HTTP ${metaRes.status}`
+        if (metaRes.status === 401) throw Object.assign(new Error("Sua sessão expirou."), { status: 401, action: "LOGOUT" })
+        if (metaRes.status === 403) throw Object.assign(new Error(errMsg), { status: 403 })
+        if (metaRes.status === 429) throw Object.assign(new Error("Limite de requisições excedido."), { status: 429 })
+        throw new Error(errMsg)
+    }
+
+    const metaData = await metaRes.json()
+    const sheetsList = metaData.sheets || []
+
+    if (sheetsList.length === 0) {
+        throw new Error("A planilha não contém abas.")
+    }
+
+    const sheetsResultMap: Record<string, string> = {}
+
+    const rangesQuery = sheetsList
+        .map((sheet: any) => `ranges=${encodeURIComponent("'" + sheet.properties.title + "'!A1:ZZ2500")}`)
+        .join("&")
+
+    const batchRes = await fetchSheetsWithTimeout(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${rangesQuery}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        45000
+    )
+
+    if (!batchRes.ok) {
+        const errBody = await batchRes.json().catch(() => ({}))
+        const errMsg = errBody?.error?.message || `Erro HTTP ${batchRes.status}`
+        throw new Error(errMsg)
+    }
+
+    const batchData = await batchRes.json()
+    const valueRanges = batchData.valueRanges || []
+
+    valueRanges.forEach((rangeData: any, idx: number) => {
+        const title = sheetsList[idx]?.properties?.title || `Aba${idx}`
+        const rows = rangeData.values || []
+        sheetsResultMap[title] = rowsToCsv(rows)
+    })
+
+    const primaryTitle = sheetsList[0]?.properties?.title || "Geral"
+    return {
+        sheets: sheetsResultMap,
+        csvText: sheetsResultMap[primaryTitle] || "",
+    }
+}
+
 export const fetchSheetDataDirectly = async (url: string, token: string | null): Promise<SheetFetchResult> => {
     try {
+        // Tenta primeiro através da API do servidor Express local
         const response = await fetch(`${window.location.origin}/api/sync-sheet`, {
             method: 'POST',
             headers: {
@@ -250,6 +314,15 @@ export const fetchSheetDataDirectly = async (url: string, token: string | null):
             },
             body: JSON.stringify({ url, token })
         })
+
+        // Se a rota do servidor Express não estiver implementada ou der erro de método (404/405), tentamos ler diretamente via API do Google no frontend
+        if (!response.ok && (response.status === 404 || response.status === 405)) {
+            console.warn(`Servidor de sincronização indisponível (HTTP ${response.status}). Executando fallback via API do Google Sheets...`)
+            if (!token) {
+                throw new Error("Token de acesso não disponível para ler planilha privada via API do Google. Faça login.")
+            }
+            return await fetchSheetDataFromGoogleAPI(url, token)
+        }
 
         if (!response.ok) {
             const errBody = await response.json().catch(() => ({}))
@@ -276,6 +349,12 @@ export const fetchSheetDataDirectly = async (url: string, token: string | null):
             csvText: data.csvText || ""
         }
     } catch (error: any) {
+        // Se der falha de rede (ex: Servidor Express desligado) e tivermos token, executa o fallback para a API oficial do Google Sheets
+        const isNetworkError = error instanceof TypeError || (error.message && error.message.toLowerCase().includes("fetch"));
+        if (isNetworkError && token) {
+            console.warn("Falha de conexão com a API do servidor. Tentando fallback direto via API do Google Sheets...")
+            return await fetchSheetDataFromGoogleAPI(url, token)
+        }
         console.error("Erro em fetchSheetDataDirectly:", error)
         throw error
     }
