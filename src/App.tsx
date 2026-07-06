@@ -13,6 +13,7 @@ import {
   query,
   where,
   googleSignIn,
+  googleSignInPopup,
   logout,
   initAuth,
   getAccessToken,
@@ -285,12 +286,20 @@ export default function App() {
   const [googleToken, setGoogleToken] = useState<string | null>(null);
   const [isLoggingInGoogle, setIsLoggingInGoogle] = useState<boolean>(false);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
+  const [googleTokenExpired, setGoogleTokenExpired] = useState<boolean>(false);
   const [hasAutoSyncedOnStartup, setHasAutoSyncedOnStartup] =
     useState<boolean>(false);
   const [hasSpreadsheetAccess, setHasSpreadsheetAccess] = useState<
     boolean | null
   >(null);
   const [selectedDetailDate, setSelectedDetailDate] = useState<string>(getCurrentDate());
+
+  // Wake Lock states
+  const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
+  const [wakeLockEnabled, setWakeLockEnabled] = useState<boolean>(
+    localStorage.getItem("wakeLockEnabled") !== "false"
+  );
+  const wakeLockRef = React.useRef<any>(null);
 
   // Notifications
   const previousTodayCounts = React.useRef<Record<string, number>>({});
@@ -307,6 +316,7 @@ export default function App() {
       (user, token) => {
         setGoogleUser(user);
         setGoogleToken(token);
+        setGoogleTokenExpired(false); // Reseta o estado expirado após login com sucesso
         setIsAuthLoading(false);
       },
       () => {
@@ -324,15 +334,9 @@ export default function App() {
   const handleGoogleLogin = async () => {
     setIsLoggingInGoogle(true);
     try {
-      const result = await googleSignIn();
-      if (result) {
-        setGoogleUser(result.user);
-        setGoogleToken(result.accessToken);
-        // If there's an existing URL, sync it instantly!
-        if (spreadsheetUrl) {
-          triggerSheetsSync(spreadsheetUrl, estagiarios);
-        }
-      }
+      // Abre o fluxo de login em um popup para não recarregar a janela principal do sistema
+      await googleSignInPopup();
+      setGoogleTokenExpired(false);
     } catch (err: any) {
       console.error(err);
       alert(
@@ -356,6 +360,75 @@ export default function App() {
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Fechamento automático do popup de login se a janela atual foi aberta via popup de callback do Supabase
+  useEffect(() => {
+    const isCallbackPopup = window.opener && (window.location.hash.includes("access_token") || window.location.search.includes("code"));
+    if (isCallbackPopup) {
+      console.log("Detectado fluxo de callback no popup. Salvando sessão e fechando em 1 segundo...");
+      setTimeout(() => {
+        window.close();
+      }, 1000);
+    }
+  }, []);
+
+  // Screen Wake Lock API para prevenir que o computador entre em modo repouso
+  const requestWakeLock = async () => {
+    if (!wakeLockEnabled || !('wakeLock' in navigator)) {
+      setWakeLockActive(false);
+      return;
+    }
+    try {
+      if (wakeLockRef.current) {
+        return; // Já está ativo
+      }
+      const lock = await navigator.wakeLock.request('screen');
+      wakeLockRef.current = lock;
+      setWakeLockActive(true);
+      console.log('Wake Lock ativo: a tela não irá desligar.');
+      
+      lock.addEventListener('release', () => {
+        console.log('Wake Lock liberado.');
+        wakeLockRef.current = null;
+        setWakeLockActive(false);
+      });
+    } catch (err: any) {
+      console.error(`Falha ao ativar Wake Lock: ${err.message}`);
+      setWakeLockActive(false);
+    }
+  };
+
+  const releaseWakeLock = async () => {
+    if (wakeLockRef.current) {
+      try {
+        await wakeLockRef.current.release();
+      } catch (err) {
+        console.error("Erro ao liberar Wake Lock:", err);
+      }
+      wakeLockRef.current = null;
+    }
+    setWakeLockActive(false);
+  };
+
+  useEffect(() => {
+    if (wakeLockEnabled) {
+      requestWakeLock();
+    } else {
+      releaseWakeLock();
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && wakeLockEnabled) {
+        requestWakeLock();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      releaseWakeLock();
+    };
+  }, [wakeLockEnabled]);
 
   // Update selectedDetailDate when selectedMonth changes
   useEffect(() => {
@@ -1544,10 +1617,7 @@ export default function App() {
     setSheetSyncError("");
 
     try {
-      const activeToken = (await getAccessToken()) || googleToken;
-      if (!activeToken) {
-        throw new Error("Token de acesso não disponível. Faça login novamente.");
-      }
+      const activeToken = (await getAccessToken()) || googleToken || null;
 
       const resData = await fetchSheetDataDirectly(urlStr, activeToken);
       const parseResult = parseSheetData(
@@ -1627,18 +1697,13 @@ export default function App() {
       const isQuotaError = err.status === 429 || (err.message && err.message.toLowerCase().includes("quota"));
       if (err.status === 401 || err.status === 403) {
         setHasSpreadsheetAccess(false);
-        // Se for erro de sessão expirada / token inválido (401), tentamos reautenticar de forma automatizada
         if (err.status === 401) {
-          const lastAutoAuthStr = sessionStorage.getItem("last_auto_reauth_time");
-          const now = Date.now();
-          const delay = 15000; // 15 segundos de cooldown
-          
-          if (!lastAutoAuthStr || now - parseInt(lastAutoAuthStr, 10) > delay) {
-            sessionStorage.setItem("last_auto_reauth_time", now.toString());
-            console.warn("Detectado token do Google expirado (401). Iniciando reautenticação automática...");
-            googleSignIn();
-            return;
+          setGoogleTokenExpired(true);
+          console.warn("Detectado token do Google expirado ou ausente (401).");
+          if (showFeedback) {
+            handleGoogleLogin();
           }
+          return;
         }
       } else if (!isQuotaError && !hasSpreadsheetAccess && hasSpreadsheetAccess !== null) {
         // Leave it false if it was already false, but if it's 429, don't force it to false
@@ -1999,7 +2064,9 @@ export default function App() {
         const existing = entriesRef.current.find(
           (e) => e.estagiarioId === entry.estagiarioId && e.date === entry.date
         );
-        if (!existing || existing.count !== entry.count) {
+        const existingBStr = JSON.stringify(existing?.typeBreakdown || {});
+        const entryBStr = JSON.stringify(entry.typeBreakdown || {});
+        if (!existing || existing.count !== entry.count || existingBStr !== entryBStr) {
           entriesToUpsert.push(entry);
         }
       });
@@ -3388,6 +3455,28 @@ export default function App() {
               </p>
             </div>
 
+            {('wakeLock' in navigator) && (
+              <button
+                onClick={() => {
+                  const nextVal = !wakeLockEnabled;
+                  setWakeLockEnabled(nextVal);
+                  localStorage.setItem("wakeLockEnabled", String(nextVal));
+                  showToast(nextVal ? "Prevenção de suspensão ativada!" : "Prevenção de suspensão desativada.", nextVal ? "success" : "info");
+                }}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all border cursor-pointer select-none ${
+                  wakeLockActive 
+                    ? "bg-amber-50 border-amber-200 text-amber-700 shadow-sm" 
+                    : "bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-100"
+                }`}
+                title={wakeLockActive ? "Prevenção de Repouso Ativa (A tela não vai apagar)" : "Prevenção de Repouso Inativa (Clique para manter a tela sempre ligada)"}
+              >
+                <Zap className={`w-3.5 h-3.5 ${wakeLockActive ? "fill-amber-400 text-amber-500 animate-pulse" : ""}`} />
+                <span className="hidden sm:inline">
+                  {wakeLockActive ? "Tela: Sempre Ligada" : "Tela: Suspender (Padrão)"}
+                </span>
+              </button>
+            )}
+
             <div className="flex items-center gap-2">
               {googleUser ? (
                 <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1.5 pl-2">
@@ -3504,6 +3593,32 @@ export default function App() {
                     className="px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-900 rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer"
                   >
                     Reconectar Google
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Banner de Sessão Expirada do Google */}
+            {googleTokenExpired && (
+              <div className="bg-red-500/10 border border-red-500/30 text-red-900 p-4 rounded-xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shadow-sm animate-fade-in shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-red-500/20 text-red-700 flex items-center justify-center shrink-0">
+                    <HelpCircle className="w-5 h-5" />
+                  </div>
+                  <div className="text-left">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-red-800">Conexão do Google Expirada</h4>
+                    <p className="text-xs text-slate-600 mt-0.5 leading-normal">
+                      Sua sessão de acesso às planilhas do Google expirou por segurança. Reconecte para manter os dados atualizados.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                  <button
+                    onClick={handleGoogleLogin}
+                    disabled={isLoggingInGoogle}
+                    className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer"
+                  >
+                    {isLoggingInGoogle ? "Conectando..." : "Reconectar Google"}
                   </button>
                 </div>
               </div>
@@ -5724,6 +5839,37 @@ export default function App() {
                           </button>
                         </div>
                       </div>
+
+                      {('wakeLock' in navigator) && (
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-200">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              id="chk-wake-lock"
+                              checked={wakeLockEnabled}
+                              onChange={(e) => {
+                                const nextVal = e.target.checked;
+                                setWakeLockEnabled(nextVal);
+                                localStorage.setItem("wakeLockEnabled", String(nextVal));
+                                showToast(nextVal ? "Prevenção de repouso ativada!" : "Prevenção de repouso desativada.", nextVal ? "success" : "info");
+                              }}
+                              className="w-4 h-4 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500"
+                            />
+                            <label
+                              htmlFor="chk-wake-lock"
+                              className="text-xs font-bold text-slate-700 cursor-pointer"
+                            >
+                              Prevenir modo de repouso (impedir que o computador suspenda com a aba aberta)
+                            </label>
+                          </div>
+                          {wakeLockActive && (
+                            <span className="text-[10px] bg-amber-50 text-amber-700 border border-amber-200 font-bold px-2 py-0.5 rounded-full flex items-center gap-1 self-start sm:self-center shrink-0">
+                              <Zap className="w-2.5 h-2.5 fill-amber-400 text-amber-500 animate-pulse" />
+                              Prevenção Ativa
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 

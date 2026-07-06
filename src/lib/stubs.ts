@@ -4,7 +4,7 @@
  * Antes era um conjunto de stubs vazios simulando Firebase.
  * Agora implementa todas as funções usando Supabase como backend real.
  */
-import { supabase, signInWithGoogle as _signInWithGoogle, signOut as _signOut, getGoogleAccessToken } from './supabase'
+import { supabase, signInWithGoogle as _signInWithGoogle, signInWithGooglePopup as _signInWithGooglePopup, signOut as _signOut, getGoogleAccessToken } from './supabase'
 import type { Estagiario, ProductivityEntry } from './types'
 
 // =====================================================
@@ -330,6 +330,10 @@ export const batchUpsertEntries = async (items: Omit<ProductivityEntry, 'id'>[])
 export const googleSignIn = async (): Promise<{ user: any; accessToken: string } | null> => {
   await _signInWithGoogle()
   return null // redirect flow — a sessão é recuperada no retorno
+}
+
+export const googleSignInPopup = async (): Promise<Window | null> => {
+  return _signInWithGooglePopup()
 }
 
 export const logout = async (): Promise<void> => {

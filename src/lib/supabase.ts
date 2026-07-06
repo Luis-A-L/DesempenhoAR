@@ -99,6 +99,44 @@ export const signInWithGoogle = async () => {
     return data
 }
 
+export const signInWithGooglePopup = async () => {
+    if (!isSupabaseConfigured) {
+          throw new Error('Supabase nao configurado. Por favor, configure as credenciais.')
+    }
+    const { data, error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+                  scopes: 'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid',
+                  redirectTo: window.location.origin + import.meta.env.BASE_URL,
+                  skipBrowserRedirect: true,
+                  queryParams: {
+                            access_type: 'offline',
+                            prompt: 'consent',
+                  },
+          },
+    })
+    if (error) {
+          console.error('Erro no login com Google:', error)
+          throw error
+    }
+    
+    if (data?.url) {
+        const width = 500
+        const height = 600
+        const left = window.screenX + (window.outerWidth - width) / 2
+        const top = window.screenY + (window.outerHeight - height) / 2
+        
+        const popup = window.open(
+            data.url,
+            'google-login-popup',
+            `width=${width},height=${height},left=${left},top=${top},status=no,resizable=yes,scrollbars=yes`
+        )
+        return popup
+    }
+    return null
+}
+
+
 export const signOut = async () => {
     if (!isSupabaseConfigured) return
     const { error } = await supabase.auth.signOut()
@@ -165,64 +203,43 @@ export interface SheetFetchResult {
     csvText: string
 }
 
-export const fetchSheetDataDirectly = async (url: string, token: string): Promise<SheetFetchResult> => {
-    const spreadsheetId = getSpreadsheetIdFromUrl(url)
-    if (!spreadsheetId) {
-        throw new Error("Formato do link do Google Planilhas inválido.")
-    }
+export const fetchSheetDataDirectly = async (url: string, token: string | null): Promise<SheetFetchResult> => {
+    try {
+        const response = await fetch(`${window.location.origin}/api/sync-sheet`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+            },
+            body: JSON.stringify({ url, token })
+        })
 
-    const metaRes = await fetchSheetsWithTimeout(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`,
-        { headers: { Authorization: `Bearer ${token}` } },
-        15000
-    )
+        if (!response.ok) {
+            const errBody = await response.json().catch(() => ({}))
+            const errMsg = errBody?.error || `Erro HTTP ${response.status}`
+            if (response.status === 401 || errBody.action === "LOGOUT") {
+                throw Object.assign(new Error("Sua sessão expirou."), { status: 401, action: "LOGOUT" })
+            }
+            if (response.status === 403) {
+                throw Object.assign(new Error(errMsg), { status: 403 })
+            }
+            if (response.status === 429) {
+                throw Object.assign(new Error("Limite de requisições excedido pelo Google."), { status: 429 })
+            }
+            throw new Error(errMsg)
+        }
 
-    if (!metaRes.ok) {
-        const errBody = await metaRes.json().catch(() => ({}))
-        const errMsg = errBody?.error?.message || `Erro HTTP ${metaRes.status}`
-        if (metaRes.status === 401) throw Object.assign(new Error("Sua sessão expirou."), { status: 401, action: "LOGOUT" })
-        if (metaRes.status === 403) throw Object.assign(new Error(errMsg), { status: 403 })
-        if (metaRes.status === 429) throw Object.assign(new Error("Limite de requisições excedido."), { status: 429 })
-        throw new Error(errMsg)
-    }
+        const data = await response.json()
+        if (!data.success) {
+            throw new Error(data.error || "Erro desconhecido na sincronização.")
+        }
 
-    const metaData = await metaRes.json()
-    const sheetsList = metaData.sheets || []
-
-    if (sheetsList.length === 0) {
-        throw new Error("A planilha não contém abas.")
-    }
-
-    const sheetsResultMap: Record<string, string> = {}
-
-    const rangesQuery = sheetsList
-        .map((sheet: any) => `ranges=${encodeURIComponent("'" + sheet.properties.title + "'!A1:ZZ2500")}`)
-        .join("&")
-
-    const batchRes = await fetchSheetsWithTimeout(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${rangesQuery}`,
-        { headers: { Authorization: `Bearer ${token}` } },
-        45000
-    )
-
-    if (!batchRes.ok) {
-        const errBody = await batchRes.json().catch(() => ({}))
-        const errMsg = errBody?.error?.message || `Erro HTTP ${batchRes.status}`
-        throw new Error(errMsg)
-    }
-
-    const batchData = await batchRes.json()
-    const valueRanges = batchData.valueRanges || []
-
-    valueRanges.forEach((rangeData: any, idx: number) => {
-        const title = sheetsList[idx]?.properties?.title || `Aba${idx}`
-        const rows = rangeData.values || []
-        sheetsResultMap[title] = rowsToCsv(rows)
-    })
-
-    const primaryTitle = sheetsList[0]?.properties?.title || "Geral"
-    return {
-        sheets: sheetsResultMap,
-        csvText: sheetsResultMap[primaryTitle] || "",
+        return {
+            sheets: data.sheets || {},
+            csvText: data.csvText || ""
+        }
+    } catch (error: any) {
+        console.error("Erro em fetchSheetDataDirectly:", error)
+        throw error
     }
 }
