@@ -142,7 +142,7 @@ export const getDoc = async (ref: DocRef): Promise<{
     .select('*')
     .eq(pkColumn, ref.id)
     .maybeSingle()
-  if (error || !data) {
+  if (error || !list) {
     return { exists: () => false, data: () => ({}) }
   }
 
@@ -151,9 +151,9 @@ export const getDoc = async (ref: DocRef): Promise<{
     data: () => {
       if (ref.table === 'settings') {
         // Retorna o conteúdo do JSONB value diretamente
-        return data.value ?? {}
+        return list.value ?? {}
       }
-      const { id, ...rest } = data
+      const { id, ...rest } = list
       return rest
     },
   }

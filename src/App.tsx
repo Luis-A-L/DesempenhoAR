@@ -189,6 +189,7 @@ export default function App() {
   const DEFAULT_SHEET_URL =
     "https://docs.google.com/spreadsheets/d/1hTAx1DO1x4rI8vJ0IQUKEyZqrws2FtcJMSPwFtt-r78/edit?pli=1&gid=548073705#gid=548073705";
   const [isSheetsModalOpen, setIsSheetsModalOpen] = useState<boolean>(false);
+  const [isReconnectModalOpen, setIsReconnectModalOpen] = useState<boolean>(false);
   const [spreadsheetUrl, setSpreadsheetUrl] =
     useState<string>(DEFAULT_SHEET_URL);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(true);
@@ -287,6 +288,7 @@ export default function App() {
   const [isLoggingInGoogle, setIsLoggingInGoogle] = useState<boolean>(false);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
   const [googleTokenExpired, setGoogleTokenExpired] = useState<boolean>(false);
+  const [prevToken, setPrevToken] = useState<string | null>(null);
   const [hasAutoSyncedOnStartup, setHasAutoSyncedOnStartup] =
     useState<boolean>(false);
   const [hasSpreadsheetAccess, setHasSpreadsheetAccess] = useState<
@@ -1690,7 +1692,7 @@ export default function App() {
       setLastSyncDuration(duration);
 
       if (showFeedback) {
-        setIsSheetsModalOpen(true);
+        showToast(parseResult.message || "Planilha sincronizada com sucesso!", "success");
       }
     } catch (err: any) {
       console.error(err);
@@ -2282,6 +2284,24 @@ export default function App() {
     hasAutoSyncedOnStartup,
     syncingSheets,
   ]);
+
+  // Abre o popup de reconexão se o token do Google estiver expirado e houver planilha vinculada
+  useEffect(() => {
+    if (googleTokenExpired && spreadsheetUrl) {
+      setIsReconnectModalOpen(true);
+    }
+  }, [googleTokenExpired, spreadsheetUrl]);
+
+  // Rastreia novo token de login para sincronizar imediatamente em segundo plano
+  useEffect(() => {
+    if (googleToken && googleToken !== prevToken && spreadsheetUrl) {
+      setPrevToken(googleToken);
+      setIsReconnectModalOpen(false);
+      triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
+    } else if (!googleToken) {
+      setPrevToken(null);
+    }
+  }, [googleToken, spreadsheetUrl, prevToken]);
 
   // Real-time notifications for productivity updates
   useEffect(() => {
@@ -6032,6 +6052,64 @@ export default function App() {
                     className="px-4 py-2 border border-slate-300 text-slate-600 hover:bg-slate-150 rounded-lg text-xs font-bold cursor-pointer"
                   >
                     Fechar Painel
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* MODAL: RECONECTAR GOOGLE */}
+        <AnimatePresence>
+          {isReconnectModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsReconnectModalOpen(false)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              ></motion.div>
+
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-md w-full overflow-hidden relative z-10 flex flex-col p-6 space-y-4"
+              >
+                <div className="flex items-center gap-3 text-amber-600">
+                  <div className="w-12 h-12 rounded-full bg-amber-50 flex items-center justify-center shrink-0">
+                    <Lock className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900">
+                      Sessão do Google Expirada
+                    </h3>
+                    <p className="text-[10px] text-slate-500 font-medium tracking-wide uppercase">
+                      Reconexão necessária para sincronização
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-xs text-slate-650 text-slate-600 leading-relaxed font-medium">
+                  Sua conexão para sincronização automática com o Google Sheets expirou por segurança. Reconecte sua conta do Google para manter a produtividade dos estagiários atualizada em tempo real.
+                </p>
+
+                <div className="flex flex-col gap-2 pt-2">
+                  <button
+                    onClick={async () => {
+                      await handleGoogleLogin();
+                    }}
+                    disabled={isLoggingInGoogle}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {isLoggingInGoogle ? "Conectando..." : "Reconectar Conta do Google"}
+                  </button>
+                  <button
+                    onClick={() => setIsReconnectModalOpen(false)}
+                    className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-all cursor-pointer text-center"
+                  >
+                    Decidir Depois / Fechar
                   </button>
                 </div>
               </motion.div>
