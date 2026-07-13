@@ -861,7 +861,7 @@ export default function App() {
               ? cells[goalColIdx]
               : "";
 
-          let parsedRole = "graduacao";
+          let parsedRole = "";
           const normRole = normalizeText(rawRole);
           if (
             normRole.includes("pos_grad") ||
@@ -879,26 +879,37 @@ export default function App() {
             parsedRole = "graduacao";
           }
 
-          let parsedGoal = parsedRole === "pos_graduacao" ? 30 : 25;
-          if (rawGoal) {
-            const gNum = parseInt(rawGoal.replace(/[^0-9]/g, ""), 10);
-            if (!isNaN(gNum) && gNum > 0) parsedGoal = gNum;
-          }
-
           const computedId = rawName
             .toLowerCase()
             .normalize("NFD")
             .replace(/[\u0300-\u036f]/g, "")
             .replace(/\s+/g, "_")
             .replace(/[^a-z0-9_]/g, "");
+
           if (computedId) {
+            const existingEstag = currentEstagiarios.find((x) => x.id === computedId);
+            const fallbackRole = existingEstag ? existingEstag.role : "graduacao";
+            const finalRole = parsedRole || fallbackRole;
+
+            let parsedGoal = finalRole === "pos_graduacao" ? 30 : 25;
+            if (rawGoal) {
+              const gNum = parseInt(rawGoal.replace(/[^0-9]/g, ""), 10);
+              if (!isNaN(gNum) && gNum > 0) parsedGoal = gNum;
+            } else if (existingEstag) {
+              parsedGoal = existingEstag.dailyGoal;
+            }
+
             if (!estagiariosFromSheet.some((x) => x.id === computedId)) {
               estagiariosFromSheet.push({
                 id: computedId,
                 name: rawName,
-                role: parsedRole,
+                role: finalRole,
                 dailyGoal: parsedGoal,
-                matricula: rawMatricula ? rawMatricula.trim() : "",
+                matricula: rawMatricula
+                  ? rawMatricula.trim()
+                  : existingEstag
+                  ? existingEstag.matricula
+                  : "",
               });
             }
           }
