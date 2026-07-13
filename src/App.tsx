@@ -2257,16 +2257,18 @@ export default function App() {
       spreadsheetUrl &&
       !loading &&
       !isAuthLoading &&
-      !hasAutoSyncedOnStartup
+      !hasAutoSyncedOnStartup &&
+      estagiarios.length > 0
     ) {
       setHasAutoSyncedOnStartup(true);
-      triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
+      triggerSheetsSync(spreadsheetUrl, estagiarios, false);
     }
   }, [
     spreadsheetUrl,
     loading,
     isAuthLoading,
     hasAutoSyncedOnStartup,
+    estagiarios,
   ]);
 
   // Polling para "tempo real" a cada 60 segundos (diminuído consumo de requisições)
@@ -2281,7 +2283,7 @@ export default function App() {
       !syncingSheets
     ) {
       interval = setInterval(() => {
-        triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
+        triggerSheetsSync(spreadsheetUrl, estagiarios, false);
       }, 60000);
     }
 
@@ -2305,14 +2307,14 @@ export default function App() {
 
   // Rastreia novo token de login para sincronizar imediatamente em segundo plano
   useEffect(() => {
-    if (googleToken && googleToken !== prevToken && spreadsheetUrl) {
+    if (googleToken && googleToken !== prevToken && spreadsheetUrl && estagiarios.length > 0) {
       setPrevToken(googleToken);
       setIsReconnectModalOpen(false);
-      triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
+      triggerSheetsSync(spreadsheetUrl, estagiarios, false);
     } else if (!googleToken) {
       setPrevToken(null);
     }
-  }, [googleToken, spreadsheetUrl, prevToken]);
+  }, [googleToken, spreadsheetUrl, prevToken, estagiarios]);
 
   // Real-time notifications for productivity updates
   useEffect(() => {
