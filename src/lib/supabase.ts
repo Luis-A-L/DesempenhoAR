@@ -257,7 +257,11 @@ const fetchSheetDataFromGoogleAPI = async (url: string, token: string): Promise<
         const errBody = await metaRes.json().catch(() => ({}))
         const errMsg = errBody?.error?.message || `Erro HTTP ${metaRes.status}`
         if (metaRes.status === 401) throw Object.assign(new Error("Sua sessão expirou."), { status: 401, action: "LOGOUT" })
-        if (metaRes.status === 403) throw Object.assign(new Error(errMsg), { status: 403 })
+        if (metaRes.status === 403) {
+            const normalizedMsg = errMsg.toLowerCase()
+            const requiresReauth = normalizedMsg.includes("scope") || normalizedMsg.includes("insufficient") || normalizedMsg.includes("authentication credentials")
+            throw Object.assign(new Error(errMsg), { status: 403, action: requiresReauth ? "REAUTH" : undefined })
+        }
         if (metaRes.status === 429) throw Object.assign(new Error("Limite de requisições excedido."), { status: 429 })
         throw new Error(errMsg)
     }
@@ -331,7 +335,11 @@ export const fetchSheetDataDirectly = async (url: string, token: string | null):
                 throw Object.assign(new Error("Sua sessão expirou."), { status: 401, action: "LOGOUT" })
             }
             if (response.status === 403) {
-                throw Object.assign(new Error(errMsg), { status: 403 })
+                throw Object.assign(new Error(errMsg), {
+                    status: 403,
+                    action: errBody.action,
+                    googleError: errBody.googleError,
+                })
             }
             if (response.status === 429) {
                 throw Object.assign(new Error("Limite de requisições excedido pelo Google."), { status: 429 })

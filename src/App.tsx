@@ -861,7 +861,7 @@ export default function App() {
               ? cells[goalColIdx]
               : "";
 
-          let parsedRole = "";
+          let parsedRole = "graduacao";
           const normRole = normalizeText(rawRole);
           if (
             normRole.includes("pos_grad") ||
@@ -879,37 +879,26 @@ export default function App() {
             parsedRole = "graduacao";
           }
 
+          let parsedGoal = parsedRole === "pos_graduacao" ? 30 : 25;
+          if (rawGoal) {
+            const gNum = parseInt(rawGoal.replace(/[^0-9]/g, ""), 10);
+            if (!isNaN(gNum) && gNum > 0) parsedGoal = gNum;
+          }
+
           const computedId = rawName
             .toLowerCase()
             .normalize("NFD")
             .replace(/[\u0300-\u036f]/g, "")
             .replace(/\s+/g, "_")
             .replace(/[^a-z0-9_]/g, "");
-
           if (computedId) {
-            const existingEstag = currentEstagiarios.find((x) => x.id === computedId);
-            const fallbackRole = existingEstag ? existingEstag.role : "graduacao";
-            const finalRole = parsedRole || fallbackRole;
-
-            let parsedGoal = finalRole === "pos_graduacao" ? 30 : 25;
-            if (rawGoal) {
-              const gNum = parseInt(rawGoal.replace(/[^0-9]/g, ""), 10);
-              if (!isNaN(gNum) && gNum > 0) parsedGoal = gNum;
-            } else if (existingEstag) {
-              parsedGoal = existingEstag.dailyGoal;
-            }
-
             if (!estagiariosFromSheet.some((x) => x.id === computedId)) {
               estagiariosFromSheet.push({
                 id: computedId,
                 name: rawName,
-                role: finalRole,
+                role: parsedRole,
                 dailyGoal: parsedGoal,
-                matricula: rawMatricula
-                  ? rawMatricula.trim()
-                  : existingEstag
-                  ? existingEstag.matricula
-                  : "",
+                matricula: rawMatricula ? rawMatricula.trim() : "",
               });
             }
           }
@@ -1718,6 +1707,13 @@ export default function App() {
           }
           return;
         }
+        if (err.action === "REAUTH") {
+          setGoogleTokenExpired(true);
+          if (showFeedback) {
+            handleGoogleLogin();
+          }
+          return;
+        }
       } else if (!isQuotaError && !hasSpreadsheetAccess && hasSpreadsheetAccess !== null) {
         // Leave it false if it was already false, but if it's 429, don't force it to false
         setHasSpreadsheetAccess(false);
@@ -2257,18 +2253,21 @@ export default function App() {
       spreadsheetUrl &&
       !loading &&
       !isAuthLoading &&
-      !hasAutoSyncedOnStartup &&
-      estagiarios.length > 0
+      !hasAutoSyncedOnStartup
     ) {
+      // Planilhas privadas precisam do token OAuth. Aguarda o login para evitar
+      // uma tentativa pÃºblica que sempre termina em HTTP 400.
+      const isPublishedUrl = spreadsheetUrl.includes("/d/e/");
+      if (!googleToken && !isPublishedUrl) return;
       setHasAutoSyncedOnStartup(true);
-      triggerSheetsSync(spreadsheetUrl, estagiarios, false);
+      triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
     }
   }, [
     spreadsheetUrl,
     loading,
     isAuthLoading,
     hasAutoSyncedOnStartup,
-    estagiarios,
+    googleToken,
   ]);
 
   // Polling para "tempo real" a cada 60 segundos (diminuído consumo de requisições)
@@ -2283,7 +2282,7 @@ export default function App() {
       !syncingSheets
     ) {
       interval = setInterval(() => {
-        triggerSheetsSync(spreadsheetUrl, estagiarios, false);
+        triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
       }, 60000);
     }
 
@@ -2307,14 +2306,14 @@ export default function App() {
 
   // Rastreia novo token de login para sincronizar imediatamente em segundo plano
   useEffect(() => {
-    if (googleToken && googleToken !== prevToken && spreadsheetUrl && estagiarios.length > 0) {
+    if (googleToken && googleToken !== prevToken && spreadsheetUrl) {
       setPrevToken(googleToken);
       setIsReconnectModalOpen(false);
-      triggerSheetsSync(spreadsheetUrl, estagiarios, false);
+      triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
     } else if (!googleToken) {
       setPrevToken(null);
     }
-  }, [googleToken, spreadsheetUrl, prevToken, estagiarios]);
+  }, [googleToken, spreadsheetUrl, prevToken]);
 
   // Real-time notifications for productivity updates
   useEffect(() => {
@@ -3140,6 +3139,24 @@ export default function App() {
       }));
   }, [normalizedEntries, selectedDetailDate, estagiarios]);
 
+  // Ranking diário para o letreiro, usando a data atualmente selecionada.
+  const dailyRankingList = useMemo(() => {
+    if (!selectedDetailDate) return [];
+
+    const countsMap: Record<string, number> = {};
+    normalizedEntries
+      .filter((entry) => entry.date === selectedDetailDate)
+      .forEach((entry) => {
+        countsMap[entry.estagiarioId] = (countsMap[entry.estagiarioId] || 0) + entry.count;
+      });
+
+    return estagiarios
+      .map((est) => ({ id: est.id, name: est.name, count: countsMap[est.id] || 0 }))
+      .filter((est) => est.count > 0)
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+      .map((est, index) => ({ ...est, rank: index + 1 }));
+  }, [normalizedEntries, selectedDetailDate, estagiarios]);
+
   const weeklyRangeLabel = useMemo(() => {
     if (!selectedDetailDate) return "";
     const d = new Date(selectedDetailDate + "T12:00:00");
@@ -3595,6 +3612,53 @@ export default function App() {
             </div>
           </div>
         </header>
+
+        {/* Letreiro contínuo com os rankings da equipe */}
+        <section className="rank-ticker shrink-0" aria-label="Rankings de produtividade">
+          <div className="rank-ticker__lane">
+            <div className="rank-ticker__label rank-ticker__label--daily">
+              <Clock className="w-3.5 h-3.5" />
+              <span>RANKING DIÁRIO</span>
+            </div>
+            <div className="rank-ticker__viewport">
+              {dailyRankingList.length === 0 ? (
+                <span className="rank-ticker__empty">Nenhum lançamento em {selectedDetailDate.split("-").reverse().join("/")}</span>
+              ) : (
+                <div className="rank-ticker__track">
+                  {[...dailyRankingList, ...dailyRankingList].map((est, index) => (
+                    <span className="rank-ticker__item" key={`daily-${est.id}-${index}`}>
+                      <strong>#{est.rank}</strong>
+                      <span>{est.name}</span>
+                      <b>{est.count.toLocaleString("pt-BR")} proc.</b>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rank-ticker__lane">
+            <div className="rank-ticker__label rank-ticker__label--weekly">
+              <Award className="w-3.5 h-3.5" />
+              <span>RANKING SEMANAL</span>
+            </div>
+            <div className="rank-ticker__viewport">
+              {weeklyRankingList.length === 0 ? (
+                <span className="rank-ticker__empty">Nenhum lançamento na semana de {weeklyRangeLabel}</span>
+              ) : (
+                <div className="rank-ticker__track rank-ticker__track--reverse">
+                  {[...weeklyRankingList, ...weeklyRankingList].map((est, index) => (
+                    <span className="rank-ticker__item" key={`weekly-${est.id}-${index}`}>
+                      <strong>#{est.rank}</strong>
+                      <span>{est.name}</span>
+                      <b>{est.count.toLocaleString("pt-BR")} proc.</b>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
 
         {/* Main Content Arena */}
           <main className="flex-1 overflow-x-hidden overflow-y-auto p-4 sm:p-6 w-full mx-auto flex flex-col gap-6">
