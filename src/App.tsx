@@ -1707,6 +1707,13 @@ export default function App() {
           }
           return;
         }
+        if (err.action === "REAUTH") {
+          setGoogleTokenExpired(true);
+          if (showFeedback) {
+            handleGoogleLogin();
+          }
+          return;
+        }
       } else if (!isQuotaError && !hasSpreadsheetAccess && hasSpreadsheetAccess !== null) {
         // Leave it false if it was already false, but if it's 429, don't force it to false
         setHasSpreadsheetAccess(false);
@@ -2248,6 +2255,10 @@ export default function App() {
       !isAuthLoading &&
       !hasAutoSyncedOnStartup
     ) {
+      // Planilhas privadas precisam do token OAuth. Aguarda o login para evitar
+      // uma tentativa pÃºblica que sempre termina em HTTP 400.
+      const isPublishedUrl = spreadsheetUrl.includes("/d/e/");
+      if (!googleToken && !isPublishedUrl) return;
       setHasAutoSyncedOnStartup(true);
       triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
     }
@@ -2256,6 +2267,7 @@ export default function App() {
     loading,
     isAuthLoading,
     hasAutoSyncedOnStartup,
+    googleToken,
   ]);
 
   // Polling para "tempo real" a cada 60 segundos (diminuído consumo de requisições)
@@ -3127,6 +3139,24 @@ export default function App() {
       }));
   }, [normalizedEntries, selectedDetailDate, estagiarios]);
 
+  // Ranking diário para o letreiro, usando a data atualmente selecionada.
+  const dailyRankingList = useMemo(() => {
+    if (!selectedDetailDate) return [];
+
+    const countsMap: Record<string, number> = {};
+    normalizedEntries
+      .filter((entry) => entry.date === selectedDetailDate)
+      .forEach((entry) => {
+        countsMap[entry.estagiarioId] = (countsMap[entry.estagiarioId] || 0) + entry.count;
+      });
+
+    return estagiarios
+      .map((est) => ({ id: est.id, name: est.name, count: countsMap[est.id] || 0 }))
+      .filter((est) => est.count > 0)
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+      .map((est, index) => ({ ...est, rank: index + 1 }));
+  }, [normalizedEntries, selectedDetailDate, estagiarios]);
+
   const weeklyRangeLabel = useMemo(() => {
     if (!selectedDetailDate) return "";
     const d = new Date(selectedDetailDate + "T12:00:00");
@@ -3582,6 +3612,53 @@ export default function App() {
             </div>
           </div>
         </header>
+
+        {/* Letreiro contínuo com os rankings da equipe */}
+        <section className="rank-ticker shrink-0" aria-label="Rankings de produtividade">
+          <div className="rank-ticker__lane">
+            <div className="rank-ticker__label rank-ticker__label--daily">
+              <Clock className="w-3.5 h-3.5" />
+              <span>RANKING DIÁRIO</span>
+            </div>
+            <div className="rank-ticker__viewport">
+              {dailyRankingList.length === 0 ? (
+                <span className="rank-ticker__empty">Nenhum lançamento em {selectedDetailDate.split("-").reverse().join("/")}</span>
+              ) : (
+                <div className="rank-ticker__track">
+                  {[...dailyRankingList, ...dailyRankingList].map((est, index) => (
+                    <span className="rank-ticker__item" key={`daily-${est.id}-${index}`}>
+                      <strong>#{est.rank}</strong>
+                      <span>{est.name}</span>
+                      <b>{est.count.toLocaleString("pt-BR")} proc.</b>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rank-ticker__lane">
+            <div className="rank-ticker__label rank-ticker__label--weekly">
+              <Award className="w-3.5 h-3.5" />
+              <span>RANKING SEMANAL</span>
+            </div>
+            <div className="rank-ticker__viewport">
+              {weeklyRankingList.length === 0 ? (
+                <span className="rank-ticker__empty">Nenhum lançamento na semana de {weeklyRangeLabel}</span>
+              ) : (
+                <div className="rank-ticker__track rank-ticker__track--reverse">
+                  {[...weeklyRankingList, ...weeklyRankingList].map((est, index) => (
+                    <span className="rank-ticker__item" key={`weekly-${est.id}-${index}`}>
+                      <strong>#{est.rank}</strong>
+                      <span>{est.name}</span>
+                      <b>{est.count.toLocaleString("pt-BR")} proc.</b>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
 
         {/* Main Content Arena */}
           <main className="flex-1 overflow-x-hidden overflow-y-auto p-4 sm:p-6 w-full mx-auto flex flex-col gap-6">

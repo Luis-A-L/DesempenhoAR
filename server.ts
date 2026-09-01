@@ -249,7 +249,18 @@ async function startServer() {
               return res.status(401).json({ error: "Sua conexão com o Google expirou. É necessário fazer login novamente.", action: "LOGOUT" });
             }
             if (status === 403) {
-              return res.status(403).json({ error: "Você não possui permissão de leitura para esta planilha. Verifique se o e-mail atual tem acesso ou altere o compartilhamento." });
+              const normalizedMsg = msg.toLowerCase();
+              const isScopeError = normalizedMsg.includes("scope") || normalizedMsg.includes("insufficient") || normalizedMsg.includes("authentication credentials");
+              const isApiDisabled = normalizedMsg.includes("has not been used") || normalizedMsg.includes("disabled") || normalizedMsg.includes("enable it");
+              let userMessage = "O Google recusou a leitura da planilha.";
+              if (isScopeError) {
+                userMessage = "A autorização do Google não inclui o escopo de leitura do Sheets. Saia da conta Google conectada e autorize novamente o acesso às planilhas.";
+              } else if (isApiDisabled) {
+                userMessage = "A Google Sheets API está desativada no projeto Google desta integração. Ela precisa ser reativada pelo administrador do projeto.";
+              } else if (normalizedMsg.includes("permission") || normalizedMsg.includes("forbidden") || normalizedMsg.includes("caller")) {
+                userMessage = "A conta Google conectada não tem acesso a esta planilha. Confirme se é exatamente o mesmo e-mail que abre a planilha no Google Sheets.";
+              }
+              return res.status(403).json({ error: userMessage, googleError: msg, action: isScopeError ? "REAUTH" : undefined });
             }
             if (msg.toLowerCase().includes("quota") || status === 429) {
               return res.status(429).json({ error: "O limite de leitura em tempo real do Google foi temporariamente atingido devido a muitos pedidos simultâneos na sua conta. O sistema continuará tentando em alguns segundos." });
