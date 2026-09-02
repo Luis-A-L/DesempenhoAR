@@ -65,13 +65,13 @@
 
 .rank-ticker__track {
   align-items: center;
-  animation: rank-ticker-scroll 32s linear infinite;
+  animation: rank-ticker-scroll 42s linear infinite;
   display: flex;
   flex: 0 0 max-content;
   min-width: max-content;
 }
 
-.rank-ticker__track--reverse { animation-name: rank-ticker-scroll-reverse; animation-duration: 38s; }
+.rank-ticker__track--reverse { animation-name: rank-ticker-scroll-reverse; animation-duration: 48s; }
 .rank-ticker__viewport:hover .rank-ticker__track,
 .rank-ticker__viewport:focus-within .rank-ticker__track { animation-play-state: paused; }
 
@@ -94,11 +94,13 @@
 }
 .rank-ticker__item .rank-ticker__name { font-weight: 700; }
 .rank-ticker__item .rank-ticker__count {
-  color: #f8fafc;
-  font-size: 12px;
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
   font-weight: 800;
 }
+.rank-ticker__count--green { color: #4ade80; }
+.rank-ticker__count--yellow { color: #facc15; }
+.rank-ticker__count--red { color: #f87171; }
 .rank-ticker__empty { color: #94a3b8; font-size: 11px; padding: 0 16px; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -110,5 +112,5 @@
   .rank-ticker__label span { font-size: 8px; }
   .rank-ticker__item { margin: 0 9px; padding-right: 18px; font-size: 12px; }
   .rank-ticker__item strong,
-  .rank-ticker__item .rank-ticker__count { font-size: 11px; }
+  .rank-ticker__item .rank-ticker__count { font-size: 13px; }
 }

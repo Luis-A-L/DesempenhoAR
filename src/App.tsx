@@ -71,6 +71,18 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
+type GoalStatus = "green" | "yellow" | "red";
+
+const getEffectiveDailyGoal = (estagiario: Estagiario) => {
+  const baseGoal = estagiario.dailyGoal ?? (estagiario.role === "pos_graduacao" ? 30 : 25);
+  return estagiario.semanaProva ? Math.round(baseGoal / 2) : baseGoal;
+};
+
+const getGoalStatus = (count: number, goal: number): GoalStatus => {
+  const ratio = goal > 0 ? count / goal : 0;
+  return ratio >= 1 ? "green" : ratio >= 0.7 ? "yellow" : "red";
+};
+
 export default function App() {
   // Date Helpers
   const getCurrentMonth = () => {
@@ -3127,6 +3139,7 @@ export default function App() {
           id: est.id,
           name: est.name,
           count,
+          goalStatus: getGoalStatus(count, getEffectiveDailyGoal(est) * 5),
           breakdown,
           totalForPct: estagiarioTotalBreakdown,
         };
@@ -3151,7 +3164,15 @@ export default function App() {
       });
 
     return estagiarios
-      .map((est) => ({ id: est.id, name: est.name, count: countsMap[est.id] || 0 }))
+      .map((est) => {
+        const count = countsMap[est.id] || 0;
+        return {
+          id: est.id,
+          name: est.name,
+          count,
+          goalStatus: getGoalStatus(count, getEffectiveDailyGoal(est)),
+        };
+      })
       .filter((est) => est.count > 0)
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
       .map((est, index) => ({ ...est, rank: index + 1 }));
@@ -3629,7 +3650,7 @@ export default function App() {
                     <span className="rank-ticker__item" key={`daily-${est.id}-${index}`}>
                       <strong>#{est.rank}</strong>
                       <span className="rank-ticker__name">{est.name}</span>
-                      <b className="rank-ticker__count">{est.count.toLocaleString("pt-BR")} proc.</b>
+                      <b className={`rank-ticker__count rank-ticker__count--${est.goalStatus}`}>{est.count.toLocaleString("pt-BR")} proc.</b>
                     </span>
                   ))}
                 </div>
@@ -3651,7 +3672,7 @@ export default function App() {
                     <span className="rank-ticker__item" key={`weekly-${est.id}-${index}`}>
                       <strong>#{est.rank}</strong>
                       <span className="rank-ticker__name">{est.name}</span>
-                      <b className="rank-ticker__count">{est.count.toLocaleString("pt-BR")} proc.</b>
+                      <b className={`rank-ticker__count rank-ticker__count--${est.goalStatus}`}>{est.count.toLocaleString("pt-BR")} proc.</b>
                     </span>
                   ))}
                 </div>
