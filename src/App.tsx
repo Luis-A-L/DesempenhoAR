@@ -97,6 +97,12 @@ const getElapsedWorkdaysInWeek = (date: Date) => {
   return dayOfWeek === 0 ? 5 : Math.min(dayOfWeek, 5);
 };
 
+const getWorkweekStart = (date: Date) => {
+  const dayOfWeek = date.getDay();
+  const daysFromMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  return new Date(date.getTime() - daysFromMonday * 24 * 60 * 60 * 1000);
+};
+
 const normalizeEstagiarioRole = (role?: string) =>
   role === "pos" || role === "pos_graduacao" || role === "pós-graduação"
     ? "pos_graduacao"
@@ -1056,6 +1062,9 @@ export default function App() {
           estagiarioId,
           date: isoDate,
           count: 1, // Cada linha de processo representa 1!
+          typeBreakdown: rawOrigem
+            ? { [rawOrigem.toUpperCase()]: 1 }
+            : {},
         });
 
         parsedDetailedProcesses.push({
@@ -1563,8 +1572,18 @@ export default function App() {
       const key = `${entry.estagiarioId}_${entry.date}`;
       if (consolidatedMap[key]) {
         consolidatedMap[key].count += entry.count;
+        if (entry.typeBreakdown) {
+          consolidatedMap[key].typeBreakdown = consolidatedMap[key].typeBreakdown || {};
+          Object.entries(entry.typeBreakdown).forEach(([type, count]) => {
+            consolidatedMap[key].typeBreakdown![type] =
+              (consolidatedMap[key].typeBreakdown![type] || 0) + Number(count);
+          });
+        }
       } else {
-        consolidatedMap[key] = { ...entry };
+        consolidatedMap[key] = {
+          ...entry,
+          typeBreakdown: { ...(entry.typeBreakdown || {}) },
+        };
       }
     });
 
@@ -3091,16 +3110,14 @@ export default function App() {
     });
   }, [normalizedEntries, selectedMonth]);
 
-  // Weekly Ranking List (Sorted descending by total productivity in the week containing selectedDetailDate)
+  // Weekly Ranking List (Monday-Friday of the workweek containing selectedDetailDate)
   const weeklyRankingList = useMemo(() => {
     if (!selectedDetailDate) return [];
     
     // Parse the selected detail date (e.g., "2026-06-25")
     const d = new Date(selectedDetailDate + "T12:00:00");
-    const dayOfWeek = d.getDay(); // 0 (Sunday) to 6 (Saturday)
-    
-    const startOfWeek = new Date(d.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
-    const endOfWeek = new Date(d.getTime() + (6 - dayOfWeek) * 24 * 60 * 60 * 1000);
+    const startOfWeek = getWorkweekStart(d);
+    const endOfWeek = new Date(startOfWeek.getTime() + 4 * 24 * 60 * 60 * 1000);
     
     const startStr = `${startOfWeek.getFullYear()}-${String(startOfWeek.getMonth() + 1).padStart(2, "0")}-${String(startOfWeek.getDate()).padStart(2, "0")}`;
     const endStr = `${endOfWeek.getFullYear()}-${String(endOfWeek.getMonth() + 1).padStart(2, "0")}-${String(endOfWeek.getDate()).padStart(2, "0")}`;
@@ -3223,9 +3240,8 @@ export default function App() {
   const weeklyRangeLabel = useMemo(() => {
     if (!selectedDetailDate) return "";
     const d = new Date(selectedDetailDate + "T12:00:00");
-    const dayOfWeek = d.getDay();
-    const startOfWeek = new Date(d.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
-    const endOfWeek = new Date(d.getTime() + (6 - dayOfWeek) * 24 * 60 * 60 * 1000);
+    const startOfWeek = getWorkweekStart(d);
+    const endOfWeek = new Date(startOfWeek.getTime() + 4 * 24 * 60 * 60 * 1000);
     const pad = (n: number) => String(n).padStart(2, "0");
     return `${pad(startOfWeek.getDate())}/${pad(startOfWeek.getMonth() + 1)} a ${pad(endOfWeek.getDate())}/${pad(endOfWeek.getMonth() + 1)}`;
   }, [selectedDetailDate]);
