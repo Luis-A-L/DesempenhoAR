@@ -19,7 +19,7 @@
 
 .rank-ticker__lane {
   display: flex;
-  min-height: 31px;
+  min-height: 34px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
 }
 
@@ -83,11 +83,22 @@
   margin: 0 12px;
   padding-right: 24px;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 13px;
+  font-weight: 700;
 }
 
-.rank-ticker__item strong { color: #94a3b8; font-size: 10px; }
-.rank-ticker__item b { color: #f8fafc; font-variant-numeric: tabular-nums; }
+.rank-ticker__item strong {
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 800;
+}
+.rank-ticker__item .rank-ticker__name { font-weight: 700; }
+.rank-ticker__item .rank-ticker__count {
+  color: #f8fafc;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
 .rank-ticker__empty { color: #94a3b8; font-size: 11px; padding: 0 16px; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -97,5 +108,7 @@
 @media (max-width: 640px) {
   .rank-ticker__label { flex-basis: 116px; padding: 0 10px; }
   .rank-ticker__label span { font-size: 8px; }
-  .rank-ticker__item { margin: 0 9px; padding-right: 18px; }
+  .rank-ticker__item { margin: 0 9px; padding-right: 18px; font-size: 12px; }
+  .rank-ticker__item strong,
+  .rank-ticker__item .rank-ticker__count { font-size: 11px; }
 }

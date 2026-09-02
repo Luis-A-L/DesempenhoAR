@@ -3628,8 +3628,8 @@ export default function App() {
                   {[...dailyRankingList, ...dailyRankingList].map((est, index) => (
                     <span className="rank-ticker__item" key={`daily-${est.id}-${index}`}>
                       <strong>#{est.rank}</strong>
-                      <span>{est.name}</span>
-                      <b>{est.count.toLocaleString("pt-BR")} proc.</b>
+                      <span className="rank-ticker__name">{est.name}</span>
+                      <b className="rank-ticker__count">{est.count.toLocaleString("pt-BR")} proc.</b>
                     </span>
                   ))}
                 </div>
@@ -3650,8 +3650,8 @@ export default function App() {
                   {[...weeklyRankingList, ...weeklyRankingList].map((est, index) => (
                     <span className="rank-ticker__item" key={`weekly-${est.id}-${index}`}>
                       <strong>#{est.rank}</strong>
-                      <span>{est.name}</span>
-                      <b>{est.count.toLocaleString("pt-BR")} proc.</b>
+                      <span className="rank-ticker__name">{est.name}</span>
+                      <b className="rank-ticker__count">{est.count.toLocaleString("pt-BR")} proc.</b>
                     </span>
                   ))}
                 </div>
