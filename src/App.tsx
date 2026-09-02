@@ -83,6 +83,20 @@ const getGoalStatus = (count: number, goal: number): GoalStatus => {
   return ratio >= 1 ? "green" : ratio >= 0.7 ? "yellow" : "red";
 };
 
+const EXCLUDED_ESTAGIARIO_IDS = new Set(["iasmin", "victoria"]);
+const SOFIA_FALLBACK: Estagiario = {
+  id: "sofia",
+  name: "Sofia",
+  role: "graduacao",
+  dailyGoal: 25,
+  matricula: "",
+};
+
+const getElapsedWorkdaysInWeek = (date: Date) => {
+  const dayOfWeek = date.getDay();
+  return dayOfWeek === 0 ? 5 : Math.min(dayOfWeek, 5);
+};
+
 export default function App() {
   // Date Helpers
   const getCurrentMonth = () => {
@@ -480,7 +494,7 @@ export default function App() {
       setLoading(true);
 
       // 1. Carregar estagiários
-      const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias"]);
+      const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias", ...EXCLUDED_ESTAGIARIO_IDS]);
       const estagiariosSnap = await getDocs(collection(db, "estagiarios"));
       const estagiariosList: Estagiario[] = [];
       estagiariosSnap.forEach((docSnap) => {
@@ -489,6 +503,9 @@ export default function App() {
           estagiariosList.push(estag);
         }
       });
+      if (!estagiariosList.some((estag) => estag.id === SOFIA_FALLBACK.id)) {
+        estagiariosList.push(SOFIA_FALLBACK);
+      }
       estagiariosList.sort((a, b) => a.name.localeCompare(b.name));
       setEstagiarios(estagiariosList);
 
@@ -2025,7 +2042,9 @@ export default function App() {
       let estagiariosToUpsert: Estagiario[] = [];
 
       if (estagiariosDetailedToCreate && estagiariosDetailedToCreate.length > 0) {
-        estagiariosToUpsert = estagiariosDetailedToCreate.filter((e) => e && e.id);
+        estagiariosToUpsert = estagiariosDetailedToCreate.filter(
+          (e) => e && e.id && !EXCLUDED_ESTAGIARIO_IDS.has(e.id),
+        );
       } else {
         for (const name of estagiariosToCreate) {
           const computedId = name
@@ -2175,6 +2194,7 @@ export default function App() {
     // Supabase Realtime — atualiza o estado local automaticamente
     const unsubEstag = subscribeToEstagiarios(
       (updated) => {
+        if (EXCLUDED_ESTAGIARIO_IDS.has(updated.id)) return;
         setEstagiarios((prev) => {
           const idx = prev.findIndex((e) => e.id === updated.id);
           if (idx !== -1) {
@@ -3068,8 +3088,9 @@ export default function App() {
     const endStr = `${endOfWeek.getFullYear()}-${String(endOfWeek.getMonth() + 1).padStart(2, "0")}-${String(endOfWeek.getDate()).padStart(2, "0")}`;
     
     // Filter entries within this week
+    const effectiveEndStr = selectedDetailDate < endStr ? selectedDetailDate : endStr;
     const weekEntries = normalizedEntries.filter(
-      (e) => e.date >= startStr && e.date <= endStr
+      (e) => e.date >= startStr && e.date <= effectiveEndStr
     );
     
     // Sum counts and type breakdown per estagiario
@@ -3139,7 +3160,10 @@ export default function App() {
           id: est.id,
           name: est.name,
           count,
-          goalStatus: getGoalStatus(count, getEffectiveDailyGoal(est) * 5),
+          goalStatus: getGoalStatus(
+            count,
+            getEffectiveDailyGoal(est) * getElapsedWorkdaysInWeek(d),
+          ),
           breakdown,
           totalForPct: estagiarioTotalBreakdown,
         };
