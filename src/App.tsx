@@ -632,7 +632,7 @@ export default function App() {
     let diagFirstDateRaw = "";
     let diagFirstDateIso = "";
     let debugRows: string[][] = [];
-    const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias"]);
+    const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias", ...EXCLUDED_ESTAGIARIO_IDS]);
 
     const normalizeText = (text: string) =>
       text
@@ -783,13 +783,20 @@ export default function App() {
       ) {
         estagiariosSheetContent = content;
         estagiariosSheetName = name;
-      } else if (targetControleSheetName) {
-        if (norm === normalizeText(targetControleSheetName)) {
+      } else {
+        if (targetControleSheetName) {
+          if (norm === normalizeText(targetControleSheetName)) {
+            allControleSheets.push({ name, content });
+          } else {
+            candidateIndividualSheets.push({ name, content });
+          }
+        } else if (norm.startsWith("controle")) {
+          // Aceita "Controle", "Controle detalhado", etc.
           allControleSheets.push({ name, content });
+        } else {
+          // Abas individuais, como "Sofia", também fazem parte da sincronização.
+          candidateIndividualSheets.push({ name, content });
         }
-      } else if (norm.startsWith("controle")) {
-        // Aceita "Controle", "Controle detalhado", etc.
-        allControleSheets.push({ name, content });
       }
     });
 
@@ -2067,8 +2074,16 @@ export default function App() {
       }
 
       // Otimização: Filtrar apenas os estagiários que sofreram alguma modificação cadastral ou novos cadastros
+      const syncIncludesSofia =
+        entriesToSave.some((entry) => entry.estagiarioId === SOFIA_FALLBACK.id) ||
+        detailedProcesses.some((process) => process.estagiarioId === SOFIA_FALLBACK.id);
+      if (syncIncludesSofia && !estagiariosToUpsert.some((estag) => estag.id === SOFIA_FALLBACK.id)) {
+        estagiariosToUpsert.push(SOFIA_FALLBACK);
+      }
+
       const finalEstagiariosToUpsert = estagiariosToUpsert.filter((newEstag) => {
         const existing = estagiariosRef.current.find((e) => e.id === newEstag.id);
+        if (newEstag.id === SOFIA_FALLBACK.id && syncIncludesSofia) return true;
         if (!existing) return true; // Novo cadastro
         return (
           existing.name !== newEstag.name ||
