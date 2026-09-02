@@ -97,6 +97,11 @@ const getElapsedWorkdaysInWeek = (date: Date) => {
   return dayOfWeek === 0 ? 5 : Math.min(dayOfWeek, 5);
 };
 
+const normalizeEstagiarioRole = (role?: string) =>
+  role === "pos" || role === "pos_graduacao" || role === "pós-graduação"
+    ? "pos_graduacao"
+    : "graduacao";
+
 export default function App() {
   // Date Helpers
   const getCurrentMonth = () => {
@@ -476,9 +481,7 @@ export default function App() {
       );
       if (detailed) {
         setEditEstagiarioName(detailed.name);
-        setEditEstagiarioRole(
-          detailed.role === "pos_graduacao" ? "pos_graduacao" : "graduacao",
-        );
+        setEditEstagiarioRole(normalizeEstagiarioRole(detailed.role));
         setEditEstagiarioDailyGoal(
           detailed.dailyGoal ?? (detailed.role === "pos_graduacao" ? 30 : 25),
         );
@@ -5326,7 +5329,7 @@ export default function App() {
                                     detailedEstagiario.name,
                                   );
                                   setEditEstagiarioRole(
-                                    detailedEstagiario.role || "pos",
+                                    normalizeEstagiarioRole(detailedEstagiario.role),
                                   );
                                   setEditEstagiarioDailyGoal(
                                     detailedEstagiario.dailyGoal ??

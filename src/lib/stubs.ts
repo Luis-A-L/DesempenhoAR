@@ -194,8 +194,35 @@ export const setDoc = async (ref: DocRef, data: any, options?: any): Promise<voi
   if (ref.table === 'estagiarios') Object.assign(row, mapEstagiarioToRow(data))
   if (ref.table === 'productivity_entries') Object.assign(row, mapEntryToRow(data))
 
+  // Edições de cadastro devem usar UPDATE explícito. O upsert exige permissão
+  // de INSERT por causa do RLS e pode aparentar sucesso sem persistir a alteração.
+  if (ref.table === 'estagiarios') {
+    const { data: updatedRows, error: updateError } = await supabase
+      .from(ref.table)
+      .update(mapEstagiarioToRow(data))
+      .eq('id', ref.id)
+      .select('id')
+
+    if (updateError) {
+      console.error(`Erro ao atualizar ${ref.table}:`, updateError)
+      throw updateError
+    }
+
+    if (updatedRows && updatedRows.length > 0) return
+
+    const { error: insertError } = await supabase.from(ref.table).insert(row)
+    if (insertError) {
+      console.error(`Erro ao inserir ${ref.table}:`, insertError)
+      throw insertError
+    }
+    return
+  }
+
   const { error } = await supabase.from(ref.table).upsert(row, { onConflict: 'id' })
-  if (error) console.error(`Erro ao salvar ${ref.table}:`, error)
+  if (error) {
+    console.error(`Erro ao salvar ${ref.table}:`, error)
+    throw error
+  }
 }
 
 export const addDoc = async (collRef: CollectionRef, data: any): Promise<{ id: string }> => {
