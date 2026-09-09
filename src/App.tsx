@@ -359,6 +359,34 @@ export default function App() {
     };
   }, []);
 
+  // Escuta mensagens do popup de autenticação Google na janela principal
+  useEffect(() => {
+    const handleAuthMessage = async (event: MessageEvent) => {
+      if (event.data?.type === "GOOGLE_AUTH_CALLBACK_SUCCESS") {
+        console.log("Login no popup finalizado com sucesso. Atualizando sessão local...");
+        const session = await getSession();
+        const token =
+          event.data.providerToken ||
+          session?.provider_token ||
+          localStorage.getItem("google_provider_token") ||
+          null;
+        if (session?.user) {
+          setGoogleUser(session.user);
+        }
+        if (token) {
+          setGoogleToken(token);
+          setGoogleTokenExpired(false);
+          setHasSpreadsheetAccess(true);
+          if (spreadsheetUrl) {
+            triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, true);
+          }
+        }
+      }
+    };
+    window.addEventListener("message", handleAuthMessage);
+    return () => window.removeEventListener("message", handleAuthMessage);
+  }, [spreadsheetUrl]);
+
   const handleGoogleLogin = async () => {
     setIsLoggingInGoogle(true);
     try {
@@ -389,14 +417,38 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Fechamento automático do popup de login se a janela atual foi aberta via popup de callback do Supabase
+  // Fechamento automático do popup de login e comunicação com a janela principal
   useEffect(() => {
-    const isCallbackPopup = window.opener && (window.location.hash.includes("access_token") || window.location.search.includes("code"));
+    const hash = window.location.hash || window.location.search;
+    const isCallbackPopup =
+      window.opener &&
+      (hash.includes("access_token") || hash.includes("code"));
     if (isCallbackPopup) {
-      console.log("Detectado fluxo de callback no popup. Salvando sessão e fechando em 1 segundo...");
+      console.log(
+        "Detectado fluxo de callback no popup. Salvando sessão e notificando janela principal...",
+      );
+      // Extrai token Google se presente no hash
+      const tokenMatch = hash.match(/provider_token=([^&]+)/);
+      const providerToken = tokenMatch
+        ? decodeURIComponent(tokenMatch[1])
+        : null;
+      if (providerToken) {
+        localStorage.setItem("google_provider_token", providerToken);
+      }
+      try {
+        window.opener.postMessage(
+          {
+            type: "GOOGLE_AUTH_CALLBACK_SUCCESS",
+            providerToken,
+          },
+          "*",
+        );
+      } catch (postErr) {
+        console.error("Erro ao enviar postMessage para janela principal:", postErr);
+      }
       setTimeout(() => {
         window.close();
-      }, 1000);
+      }, 600);
     }
   }, []);
 
@@ -783,13 +835,14 @@ export default function App() {
       ) {
         estagiariosSheetContent = content;
         estagiariosSheetName = name;
-      } else if (targetControleSheetName) {
-        if (norm === normalizeText(targetControleSheetName)) {
-          allControleSheets.push({ name, content });
-        }
-      } else if (norm.startsWith("controle")) {
+      } else if (targetControleSheetName && norm === normalizeText(targetControleSheetName)) {
+        allControleSheets.push({ name, content });
+      } else if (!targetControleSheetName && norm.startsWith("controle")) {
         // Aceita "Controle", "Controle detalhado", etc.
         allControleSheets.push({ name, content });
+      } else if (!norm.startsWith("copia") && !norm.startsWith("controle")) {
+        // Todas as outras abas de membros/estagiários individuais são candidatas
+        candidateIndividualSheets.push({ name, content });
       }
     });
 
@@ -944,10 +997,10 @@ export default function App() {
       if (idx !== -1) {
         combinedCurrentAndSheetEstagiarios[idx] = {
           ...combinedCurrentAndSheetEstagiarios[idx],
-          role: sheetEstag.role || combinedCurrentAndSheetEstagiarios[idx].role,
+          role: combinedCurrentAndSheetEstagiarios[idx].role || sheetEstag.role,
           dailyGoal:
-            sheetEstag.dailyGoal ||
-            combinedCurrentAndSheetEstagiarios[idx].dailyGoal,
+            combinedCurrentAndSheetEstagiarios[idx].dailyGoal ||
+            sheetEstag.dailyGoal,
           matricula:
             sheetEstag.matricula ||
             combinedCurrentAndSheetEstagiarios[idx].matricula,
@@ -1032,27 +1085,39 @@ export default function App() {
         const row = rows[r];
         if (dateColIdx >= row.length) continue;
 
-        const rawDate = row[dateColIdx] || "";
+        // 1. DATA: Campo obrigatório 1
+        const rawDate = (row[dateColIdx] || "").trim();
         const isoDate = parseDateToISO(rawDate);
         if (!isoDate || isoDate < "2026-04-01") continue;
 
+        // 2. NÚMERO DO PROCESSO: Campo obrigatório 2 (não pode ser vazio, nem traço, deve conter dígitos)
         const rawProc = procColIdx !== -1 && procColIdx < row.length ? row[procColIdx].trim() : "";
-        const rawOrigem = origemColIdx !== -1 && origemColIdx < row.length ? row[origemColIdx].trim() : "";
-        const normOrigem = rawOrigem.toLowerCase();
+        if (!rawProc || rawProc === "-" || rawProc.toLowerCase() === "null" || !/\d/.test(rawProc)) {
+          // Processo não foi preenchido ainda -> não contabilizar!
+          continue;
+        }
 
-        if (!rawProc) continue;
+        // 3. ORIGEM / TIPO DO RECURSO: Campo obrigatório 3 (ex: CV, RCV, DCV, CR, RCR, DCR)
+        const rawOrigem = origemColIdx !== -1 && origemColIdx < row.length ? row[origemColIdx].trim() : "";
+        if (!rawOrigem || rawOrigem === "-" || rawOrigem.toLowerCase() === "null" || rawOrigem.length < 2) {
+          // Origem/tipo não preenchido -> não contabilizar!
+          continue;
+        }
+
+        const validOrigem = rawOrigem.toUpperCase();
 
         parsedEntries.push({
           estagiarioId,
           date: isoDate,
-          count: 1, // Cada linha de processo representa 1!
+          count: 1, // Cada linha com os 3 campos preenchidos representa 1 processo finalizado
+          typeBreakdown: { [validOrigem]: 1 },
         });
 
         parsedDetailedProcesses.push({
           estagiarioId,
           date: isoDate,
           numeroProcesso: rawProc,
-          origem: normOrigem.toUpperCase() || "CV",
+          origem: validOrigem,
         });
       }
     });
@@ -1553,8 +1618,22 @@ export default function App() {
       const key = `${entry.estagiarioId}_${entry.date}`;
       if (consolidatedMap[key]) {
         consolidatedMap[key].count += entry.count;
+        if (entry.typeBreakdown) {
+          if (!consolidatedMap[key].typeBreakdown) {
+            consolidatedMap[key].typeBreakdown = {};
+          }
+          Object.entries(entry.typeBreakdown).forEach(([t, q]) => {
+            consolidatedMap[key].typeBreakdown![t] =
+              (consolidatedMap[key].typeBreakdown![t] || 0) + Number(q);
+          });
+        }
       } else {
-        consolidatedMap[key] = { ...entry };
+        consolidatedMap[key] = {
+          ...entry,
+          typeBreakdown: entry.typeBreakdown
+            ? { ...entry.typeBreakdown }
+            : undefined,
+        };
       }
     });
 
@@ -2067,16 +2146,30 @@ export default function App() {
       }
 
       // Otimização: Filtrar apenas os estagiários que sofreram alguma modificação cadastral ou novos cadastros
-      const finalEstagiariosToUpsert = estagiariosToUpsert.filter((newEstag) => {
-        const existing = estagiariosRef.current.find((e) => e.id === newEstag.id);
-        if (!existing) return true; // Novo cadastro
-        return (
-          existing.name !== newEstag.name ||
-          existing.role !== newEstag.role ||
-          existing.dailyGoal !== newEstag.dailyGoal ||
-          existing.matricula !== newEstag.matricula
-        );
-      });
+      const finalEstagiariosToUpsert = estagiariosToUpsert
+        .map((newEstag) => {
+          const existing = estagiariosRef.current.find((e) => e.id === newEstag.id);
+          if (existing) {
+            // Preserva o cargo e a meta diária já configurados no sistema se a planilha não possuir coluna explícita
+            return {
+              ...newEstag,
+              role: existing.role || newEstag.role,
+              dailyGoal: existing.dailyGoal || newEstag.dailyGoal,
+              matricula: newEstag.matricula || existing.matricula || "",
+            };
+          }
+          return newEstag;
+        })
+        .filter((newEstag) => {
+          const existing = estagiariosRef.current.find((e) => e.id === newEstag.id);
+          if (!existing) return true; // Novo cadastro
+          return (
+            existing.name !== newEstag.name ||
+            existing.role !== newEstag.role ||
+            existing.dailyGoal !== newEstag.dailyGoal ||
+            existing.matricula !== newEstag.matricula
+          );
+        });
 
       if (finalEstagiariosToUpsert.length > 0) {
         await batchUpsertEstagiarios(finalEstagiariosToUpsert);
@@ -3077,20 +3170,22 @@ export default function App() {
   const weeklyRankingList = useMemo(() => {
     if (!selectedDetailDate) return [];
     
-    // Parse the selected detail date (e.g., "2026-06-25")
+    // Parse the selected detail date (e.g., "2026-09-09")
     const d = new Date(selectedDetailDate + "T12:00:00");
     const dayOfWeek = d.getDay(); // 0 (Sunday) to 6 (Saturday)
     
-    const startOfWeek = new Date(d.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
-    const endOfWeek = new Date(d.getTime() + (6 - dayOfWeek) * 24 * 60 * 60 * 1000);
+    // Semana útil: Segunda-feira a Sexta-feira (não conta fim de semana)
+    const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const startOfWeek = new Date(d.getFullYear(), d.getMonth(), d.getDate() + diffToMonday);
+    const endOfWeek = new Date(d.getFullYear(), d.getMonth(), d.getDate() + diffToMonday + 4);
     
-    const startStr = `${startOfWeek.getFullYear()}-${String(startOfWeek.getMonth() + 1).padStart(2, "0")}-${String(startOfWeek.getDate()).padStart(2, "0")}`;
-    const endStr = `${endOfWeek.getFullYear()}-${String(endOfWeek.getMonth() + 1).padStart(2, "0")}-${String(endOfWeek.getDate()).padStart(2, "0")}`;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const startStr = `${startOfWeek.getFullYear()}-${pad(startOfWeek.getMonth() + 1)}-${pad(startOfWeek.getDate())}`;
+    const endStr = `${endOfWeek.getFullYear()}-${pad(endOfWeek.getMonth() + 1)}-${pad(endOfWeek.getDate())}`;
     
-    // Filter entries within this week
-    const effectiveEndStr = selectedDetailDate < endStr ? selectedDetailDate : endStr;
+    // Filter entries within this work week (Segunda a Sexta)
     const weekEntries = normalizedEntries.filter(
-      (e) => e.date >= startStr && e.date <= effectiveEndStr
+      (e) => e.date >= startStr && e.date <= endStr
     );
     
     // Sum counts and type breakdown per estagiario
@@ -3206,8 +3301,10 @@ export default function App() {
     if (!selectedDetailDate) return "";
     const d = new Date(selectedDetailDate + "T12:00:00");
     const dayOfWeek = d.getDay();
-    const startOfWeek = new Date(d.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
-    const endOfWeek = new Date(d.getTime() + (6 - dayOfWeek) * 24 * 60 * 60 * 1000);
+    // Semana útil: Segunda-feira a Sexta-feira (não conta fim de semana)
+    const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const startOfWeek = new Date(d.getFullYear(), d.getMonth(), d.getDate() + diffToMonday);
+    const endOfWeek = new Date(d.getFullYear(), d.getMonth(), d.getDate() + diffToMonday + 4);
     const pad = (n: number) => String(n).padStart(2, "0");
     return `${pad(startOfWeek.getDate())}/${pad(startOfWeek.getMonth() + 1)} a ${pad(endOfWeek.getDate())}/${pad(endOfWeek.getMonth() + 1)}`;
   }, [selectedDetailDate]);

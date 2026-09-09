@@ -319,16 +319,13 @@ export const fetchSheetDataDirectly = async (url: string, token: string | null):
             body: JSON.stringify({ url, token })
         })
 
-        // Se a rota do servidor Express não estiver implementada ou der erro de método (404/405), tentamos ler diretamente via API do Google no frontend
-        if (!response.ok && (response.status === 404 || response.status === 405)) {
-            console.warn(`Servidor de sincronização indisponível (HTTP ${response.status}). Executando fallback via API do Google Sheets...`)
-            if (!token) {
-                throw new Error("Token de acesso não disponível para ler planilha privada via API do Google. Faça login.")
-            }
-            return await fetchSheetDataFromGoogleAPI(url, token)
-        }
-
+        // Se a rota do servidor Express falhar, não estiver implementada (404/405) ou der erro no servidor, tentamos ler diretamente via API do Google no frontend
         if (!response.ok) {
+            if (token && (response.status === 400 || response.status === 404 || response.status === 405 || response.status >= 500)) {
+                console.warn(`Servidor local retornou HTTP ${response.status}. Executando fallback direto via Google Sheets API oficial no navegador...`)
+                return await fetchSheetDataFromGoogleAPI(url, token)
+            }
+
             const errBody = await response.json().catch(() => ({}))
             const errMsg = errBody?.error || `Erro HTTP ${response.status}`
             if (response.status === 401 || errBody.action === "LOGOUT") {
