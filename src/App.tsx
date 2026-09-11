@@ -21,6 +21,7 @@ import {
   batchUpsertEstagiarios,
   batchUpsertEntries,
   subscribeToEstagiarios,
+  subscribeToEntries,
   subscribeToSettings,
 } from "./lib/stubs";
 import { fetchSheetDataDirectly, getSession, supabase } from "./lib/supabase";
@@ -68,6 +69,9 @@ import {
   Zap,
   Lock,
   GraduationCap,
+  UserCheck,
+  UserX,
+  AlertTriangle,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -253,6 +257,31 @@ export default function App() {
   const [sheetSyncError, setSheetSyncError] = useState<string>("");
   const [pasteDataText, setPasteDataText] = useState<string>("");
   const [selectedSheetName, setSelectedSheetName] = useState<string>("Controle detalhado");
+
+  // Controle de Novos Estagiários Detectados na Sincronização
+  const [isNewEstagiariosModalOpen, setIsNewEstagiariosModalOpen] = useState<boolean>(false);
+  const [pendingNewEstagiarios, setPendingNewEstagiarios] = useState<Estagiario[]>([]);
+  const [selectedNewEstagiarioIds, setSelectedNewEstagiarioIds] = useState<Set<string>>(new Set());
+  const [pendingSyncEntries, setPendingSyncEntries] = useState<Omit<ProductivityEntry, "id">[]>([]);
+  const [pendingDetailedProcesses, setPendingDetailedProcesses] = useState<Array<{ estagiarioId: string; date: string; numeroProcesso: string; origem: string }>>([]);
+  const [pendingSheetUrl, setPendingSheetUrl] = useState<string>("");
+  const [ignoredNewEstagiarios, setIgnoredNewEstagiarios] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem("ignored_estagiarios_ids");
+      return stored ? new Set(JSON.parse(stored)) : new Set<string>();
+    } catch {
+      return new Set<string>();
+    }
+  });
+  const ignoredNewEstagiariosRef = React.useRef(ignoredNewEstagiarios);
+  useEffect(() => {
+    ignoredNewEstagiariosRef.current = ignoredNewEstagiarios;
+  }, [ignoredNewEstagiarios]);
+
+  const syncingSheetsRef = React.useRef(syncingSheets);
+  useEffect(() => {
+    syncingSheetsRef.current = syncingSheets;
+  }, [syncingSheets]);
 
 
   const [detailTab, setDetailTab] = useState<"month" | "day">("month");
@@ -1773,34 +1802,52 @@ export default function App() {
       setSheetsMessage(parseResult.message);
       setSheetSyncError("");
 
-      // Salva no Firestore — sincronização manual salva tudo, automática salva só o dia atual
-      let finalEntriesToSave = parseResult.entries;
-      let finalDetailedProcesses = parseResult.detailedProcesses || [];
-      if (!showFeedback) {
-        const todayStr = getCurrentDate();
-        finalEntriesToSave = parseResult.entries.filter(
-          (e) => e.date === todayStr
-        );
-        finalDetailedProcesses = (parseResult.detailedProcesses || []).filter(
-          (p) => p.date === todayStr
-        );
-      }
+      const existingEstagIds = new Set(estagiariosRef.current.map((e) => e.id));
+      const ignoredIds = ignoredNewEstagiariosRef.current;
 
+      // Identifica se há estagiários novos que ainda não estão no sistema nem foram previamente ignorados
+      const candidateNewEstagiarios = (parseResult.estagiariosDetailedToCreate || []).filter(
+        (e) => e && e.id && !existingEstagIds.has(e.id) && !EXCLUDED_ESTAGIARIO_IDS.has(e.id) && !ignoredIds.has(e.id)
+      );
+
+      // Entradas dos estagiários JÁ cadastrados e aprovados
+      const approvedEntriesToSave = parseResult.entries.filter(
+        (e) => existingEstagIds.has(e.estagiarioId) && !ignoredIds.has(e.estagiarioId)
+      );
+      const approvedDetailedProcesses = (parseResult.detailedProcesses || []).filter(
+        (p) => existingEstagIds.has(p.estagiarioId) && !ignoredIds.has(p.estagiarioId)
+      );
+
+      // Salva imediatamente os dados dos estagiários já existentes em tempo real
       await saveSyncedDataToFirestore(
-        finalEntriesToSave,
-        parseResult.estagiariosCreated,
+        approvedEntriesToSave,
+        [],
         urlStr,
         !showFeedback,
-        parseResult.estagiariosDetailedToCreate || [],
-        finalDetailedProcesses,
+        [],
+        approvedDetailedProcesses,
       );
+
+      // Se houver novos estagiários detectados, abre o modal de confirmação para o usuário decidir
+      if (candidateNewEstagiarios.length > 0) {
+        setPendingNewEstagiarios(candidateNewEstagiarios);
+        setSelectedNewEstagiarioIds(new Set(candidateNewEstagiarios.map((e) => e.id)));
+        setPendingSyncEntries(parseResult.entries);
+        setPendingDetailedProcesses(parseResult.detailedProcesses || []);
+        setPendingSheetUrl(urlStr);
+        setIsNewEstagiariosModalOpen(true);
+      }
 
       const endTime = Date.now();
       const duration = (endTime - startTime) / 1000;
       setLastSyncDuration(duration);
 
       if (showFeedback) {
-        showToast(parseResult.message || "Planilha sincronizada com sucesso!", "success");
+        if (candidateNewEstagiarios.length > 0) {
+          showToast(`Sincronização concluída! Foram detectados ${candidateNewEstagiarios.length} novo(s) estagiário(s) na planilha.`, "info");
+        } else {
+          showToast(parseResult.message || "Planilha sincronizada com sucesso!", "success");
+        }
       }
     } catch (err: any) {
       console.error(err);
@@ -2206,22 +2253,26 @@ export default function App() {
 
       if (entriesToUpsert.length > 0) {
         await batchUpsertEntries(entriesToUpsert);
+      }
 
-        // Atualiza o estado local 'entries' diretamente com os novos valores que foram salvos
-        // Isso previne a race condition de sumir os dados da tela pois não faz getDocs total assíncrono concorrente com o realtime
+      // Atualiza o estado local 'entries' diretamente com os novos valores consolidados
+      // Garante que o dashboard, gráficos e tabelas atualizem instantaneamente sem precisar de F5
+      if (validEntries.length > 0) {
         setEntries((prev) => {
           const next = [...prev];
-          entriesToUpsert.forEach((newEntry) => {
+          validEntries.forEach((newEntry) => {
             const idx = next.findIndex(
               (e) => e.estagiarioId === newEntry.estagiarioId && e.date === newEntry.date
             );
             if (idx !== -1) {
-              // Mantém o ID original do banco para consistência
-              next[idx] = { ...next[idx], count: newEntry.count, typeBreakdown: newEntry.typeBreakdown };
+              next[idx] = {
+                ...next[idx],
+                count: newEntry.count,
+                typeBreakdown: newEntry.typeBreakdown || next[idx].typeBreakdown,
+              };
             } else {
-              // Adiciona temporariamente sem ID (o Realtime Socket atualizará o ID definitivo do banco logo em seguida)
               next.push({
-                id: `temp_${newEntry.estagiarioId}_${newEntry.date}`,
+                id: `synced_${newEntry.estagiarioId}_${newEntry.date}`,
                 ...newEntry,
               });
             }
@@ -2273,11 +2324,107 @@ export default function App() {
       }
     } catch (err) {
       console.error("Error writing synced data", err);
-      if (!isStartupSilent)
-        alert("Erro ao gravar novos dados sincronizados no Supabase.");
+      if (!isStartupSilent) {
+        showToast("Erro ao gravar novos dados sincronizados no Supabase.", "error");
+      }
     } finally {
       setIsSaving(false);
     }
+  };
+
+  // Confirma os estagiários selecionados pelo usuário no modal de novos estagiários
+  const handleConfirmNewEstagiarios = async () => {
+    if (pendingNewEstagiarios.length === 0) {
+      setIsNewEstagiariosModalOpen(false);
+      return;
+    }
+
+    const toApprove = pendingNewEstagiarios.filter((e) => selectedNewEstagiarioIds.has(e.id));
+    const toReject = pendingNewEstagiarios.filter((e) => !selectedNewEstagiarioIds.has(e.id));
+
+    // Salva os que foram desmarcados na lista de estagiários ignorados
+    if (toReject.length > 0) {
+      const updatedIgnored = new Set(ignoredNewEstagiarios);
+      toReject.forEach((e) => updatedIgnored.add(e.id));
+      setIgnoredNewEstagiarios(updatedIgnored);
+      try {
+        localStorage.setItem("ignored_estagiarios_ids", JSON.stringify(Array.from(updatedIgnored)));
+      } catch (e) {
+        console.error("Erro ao salvar estagiários ignorados:", e);
+      }
+    }
+
+    if (toApprove.length > 0) {
+      setIsSaving(true);
+      try {
+        await batchUpsertEstagiarios(toApprove);
+        setEstagiarios((prev) => {
+          const next = [...prev];
+          toApprove.forEach((e) => {
+            if (!next.some((x) => x.id === e.id)) {
+              next.push(e);
+            }
+          });
+          return next.filter((e) => e && e.id).sort((a, b) => a.name.localeCompare(b.name));
+        });
+
+        // Salva os lançamentos dos estagiários aprovados
+        const approvedIds = new Set(toApprove.map((e) => e.id));
+        const entriesForApproved = pendingSyncEntries.filter((e) => approvedIds.has(e.estagiarioId));
+        const procsForApproved = pendingDetailedProcesses.filter((p) => approvedIds.has(p.estagiarioId));
+
+        if (entriesForApproved.length > 0 || procsForApproved.length > 0) {
+          await saveSyncedDataToFirestore(
+            entriesForApproved,
+            toApprove.map((e) => e.name),
+            pendingSheetUrl || spreadsheetUrl,
+            true,
+            toApprove,
+            procsForApproved,
+          );
+        }
+
+        showToast(
+          `${toApprove.length} novo(s) estagiário(s) adicionado(s) com sucesso!`,
+          "success"
+        );
+      } catch (err: any) {
+        console.error("Erro ao aprovar novos estagiários:", err);
+        showToast("Erro ao cadastrar novos estagiários: " + (err.message || err), "error");
+      } finally {
+        setIsSaving(false);
+      }
+    } else {
+      showToast("Nenhum estagiário foi marcado. Ninguém novo foi adicionado.", "info");
+    }
+
+    setPendingNewEstagiarios([]);
+    setIsNewEstagiariosModalOpen(false);
+  };
+
+  // Opção: Não adicionar nenhum estagiário novo
+  const handleRejectAllNewEstagiarios = () => {
+    if (pendingNewEstagiarios.length > 0) {
+      const updatedIgnored = new Set(ignoredNewEstagiarios);
+      pendingNewEstagiarios.forEach((e) => updatedIgnored.add(e.id));
+      setIgnoredNewEstagiarios(updatedIgnored);
+      try {
+        localStorage.setItem("ignored_estagiarios_ids", JSON.stringify(Array.from(updatedIgnored)));
+      } catch (e) {
+        console.error("Erro ao salvar estagiários ignorados:", e);
+      }
+    }
+
+    setPendingNewEstagiarios([]);
+    setIsNewEstagiariosModalOpen(false);
+    showToast("Nenhum novo estagiário foi adicionado. Os dados existentes foram sincronizados com sucesso!", "info");
+  };
+
+  // Redefinir lista de estagiários ignorados
+  const handleResetIgnoredEstagiarios = () => {
+    localStorage.removeItem("ignored_estagiarios_ids");
+    setIgnoredNewEstagiarios(new Set());
+    showToast("Lista de estagiários ignorados foi limpa! Na próxima sincronização eles serão listados para inclusão.", "success");
   };
 
 
@@ -2303,6 +2450,27 @@ export default function App() {
       }
     );
 
+    const unsubEntries = subscribeToEntries(
+      (updated) => {
+        if (EXCLUDED_ESTAGIARIO_IDS.has(updated.estagiarioId)) return;
+        setEntries((prev) => {
+          const idx = prev.findIndex(
+            (e) => (e.id && updated.id && e.id === updated.id) ||
+                   (e.estagiarioId === updated.estagiarioId && e.date === updated.date)
+          );
+          if (idx !== -1) {
+            const next = [...prev];
+            next[idx] = { ...next[idx], ...updated };
+            return next;
+          }
+          return [...prev, updated];
+        });
+      },
+      (deletedId) => {
+        setEntries((prev) => prev.filter((e) => e.id !== deletedId));
+      }
+    );
+
     const unsubSettings = subscribeToSettings((key, value) => {
       if (key === "semanaProva") {
         setSemanaProvaIds(value?.estagiariosIds || []);
@@ -2317,6 +2485,7 @@ export default function App() {
 
     return () => {
       unsubEstag();
+      unsubEntries();
       unsubSettings();
     };
   }, []);
@@ -2395,19 +2564,19 @@ export default function App() {
     googleToken,
   ]);
 
-  // Polling para "tempo real" a cada 60 segundos (diminuído consumo de requisições)
+  // Polling para sincronização contínua em segundo plano a cada 60 segundos
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
 
     if (
       spreadsheetUrl &&
       autoSyncEnabled &&
-      estagiarios.length > 0 &&
-      hasAutoSyncedOnStartup &&
-      !syncingSheets
+      hasAutoSyncedOnStartup
     ) {
       interval = setInterval(() => {
-        triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
+        if (!syncingSheetsRef.current) {
+          triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
+        }
       }, 60000);
     }
 
@@ -2417,9 +2586,7 @@ export default function App() {
   }, [
     spreadsheetUrl,
     autoSyncEnabled,
-    estagiarios,
     hasAutoSyncedOnStartup,
-    syncingSheets,
   ]);
 
   // Abre o popup de reconexão se o token do Google estiver expirado e houver planilha vinculada
@@ -6109,6 +6276,26 @@ export default function App() {
                           )}
                         </div>
                       )}
+
+                      {ignoredNewEstagiarios.size > 0 && (
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-200">
+                          <div className="flex items-center gap-2 text-xs text-slate-700">
+                            <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full">
+                              {ignoredNewEstagiarios.size} estagiário(s) ignorado(s)
+                            </span>
+                            <span className="text-[11px] text-slate-500">
+                              Foram detectados na planilha mas você optou por não adicionar
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleResetIgnoredEstagiarios}
+                            className="px-3 py-1.5 border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-lg text-[11px] font-bold transition-all cursor-pointer shrink-0"
+                          >
+                            Redefinir e Permitir Reavaliação
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -6329,6 +6516,165 @@ export default function App() {
                     className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-all cursor-pointer text-center"
                   >
                     Decidir Depois / Fechar
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* MODAL: APROVAÇÃO / SELEÇÃO DE NOVOS ESTAGIÁRIOS DETECTADOS NA SINCRONIZAÇÃO */}
+        <AnimatePresence>
+          {isNewEstagiariosModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              ></motion.div>
+
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full overflow-hidden relative z-10 flex flex-col"
+              >
+                {/* Header */}
+                <div className="bg-slate-900 text-white px-6 py-4 flex justify-between items-center">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                      <AlertTriangle className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-white">
+                        Novos Estagiários Detectados
+                      </h3>
+                      <p className="text-[11px] text-slate-400">
+                        {pendingNewEstagiarios.length} novo(s) perfil(is) identificado(s) na planilha
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] bg-amber-400/20 text-amber-300 font-bold px-2.5 py-1 rounded-full uppercase">
+                    Ação Necessária
+                  </span>
+                </div>
+
+                {/* Body */}
+                <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto">
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs text-slate-600 leading-relaxed font-sans">
+                    A sincronização identificou estagiários na planilha que ainda não fazem parte do sistema. Selecione abaixo quem deve ser incluído nos dados e rankings da equipe, ou opte por <strong>"Não Adicionar Nenhum"</strong> para que nenhum estagiário novo seja inserido.
+                  </div>
+
+                  {/* Seleção em Massa */}
+                  <div className="flex items-center justify-between pt-1 pb-1 border-b border-slate-100">
+                    <span className="text-xs font-bold text-slate-700">
+                      {selectedNewEstagiarioIds.size} de {pendingNewEstagiarios.length} selecionado(s)
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedNewEstagiarioIds(new Set(pendingNewEstagiarios.map((e) => e.id)))}
+                        className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
+                      >
+                        Marcar Todos
+                      </button>
+                      <span className="text-slate-300">|</span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedNewEstagiarioIds(new Set())}
+                        className="text-[11px] font-bold text-slate-500 hover:text-slate-700 transition-colors cursor-pointer"
+                      >
+                        Desmarcar Todos
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Lista de Estagiários com Checkbox */}
+                  <div className="space-y-2">
+                    {pendingNewEstagiarios.map((est) => {
+                      const isSelected = selectedNewEstagiarioIds.has(est.id);
+                      return (
+                        <div
+                          key={est.id}
+                          onClick={() => {
+                            const next = new Set(selectedNewEstagiarioIds);
+                            if (isSelected) {
+                              next.delete(est.id);
+                            } else {
+                              next.add(est.id);
+                            }
+                            setSelectedNewEstagiarioIds(next);
+                          }}
+                          className={`p-3.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
+                            isSelected
+                              ? "bg-emerald-50/70 border-emerald-300 ring-1 ring-emerald-200"
+                              : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/50 opacity-75"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {}} // acionado pelo clique no card
+                              className="w-4 h-4 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500 pointer-events-none shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold text-slate-800 truncate">
+                                {est.name}
+                              </p>
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-mono">
+                                  ID: {est.id}
+                                </span>
+                                <span className="text-[10px] text-slate-500 font-medium">
+                                  {est.role === "pos_graduacao" ? "Pós-graduação (meta 30)" : "Graduação (meta 25)"}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="shrink-0">
+                            {isSelected ? (
+                              <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                                <Check className="w-3 h-3" /> Incluir
+                              </span>
+                            ) : (
+                              <span className="text-[10px] bg-slate-100 text-slate-500 font-medium px-2 py-0.5 rounded-full">
+                                Ignorar
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Footer com Ações */}
+                <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-2.5">
+                  <button
+                    type="button"
+                    onClick={handleRejectAllNewEstagiarios}
+                    disabled={isSaving}
+                    className="w-full sm:w-auto px-4 py-2.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                  >
+                    <UserX className="w-4 h-4 text-slate-500" />
+                    Não Adicionar Nenhum
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleConfirmNewEstagiarios}
+                    disabled={isSaving}
+                    className="w-full sm:w-auto px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                  >
+                    <UserCheck className="w-4 h-4" />
+                    {isSaving
+                      ? "Salvando..."
+                      : selectedNewEstagiarioIds.size === 0
+                        ? "Confirmar (Nenhum Selecionado)"
+                        : `Confirmar Selecionados (${selectedNewEstagiarioIds.size})`}
                   </button>
                 </div>
               </motion.div>

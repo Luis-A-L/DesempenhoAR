@@ -452,6 +452,7 @@ export const subscribeToEntries = (
           estagiarioId: r.estagiario_id,
           date: r.date,
           count: r.count,
+          typeBreakdown: r.type_breakdown ?? {},
         })
       }
     )
@@ -465,6 +466,7 @@ export const subscribeToEntries = (
           estagiarioId: r.estagiario_id,
           date: r.date,
           count: r.count,
+          typeBreakdown: r.type_breakdown ?? {},
         })
       }
     )
