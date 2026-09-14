@@ -5,6 +5,7 @@ export interface Estagiario {
   dailyGoal?: number;
   matricula?: string;
   semanaProva?: boolean;
+  ferias?: boolean;
 }
 
 export interface ProductivityEntry {

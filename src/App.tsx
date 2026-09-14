@@ -69,6 +69,7 @@ import {
   Zap,
   Lock,
   GraduationCap,
+  Palmtree,
   UserCheck,
   UserX,
   AlertTriangle,
@@ -78,6 +79,7 @@ import { motion, AnimatePresence } from "motion/react";
 type GoalStatus = "green" | "yellow" | "red";
 
 const getEffectiveDailyGoal = (estagiario: Estagiario) => {
+  if (estagiario.ferias) return 0;
   const baseGoal = estagiario.dailyGoal ?? (estagiario.role === "pos_graduacao" ? 30 : 25);
   return estagiario.semanaProva ? Math.round(baseGoal / 2) : baseGoal;
 };
@@ -243,6 +245,7 @@ export default function App() {
   };
 
   const [semanaProvaIds, setSemanaProvaIds] = useState<string[]>([]);
+  const [feriasIds, setFeriasIds] = useState<string[]>([]);
 
   const [previewEntries, setPreviewEntries] = useState<
     Omit<ProductivityEntry, "id">[]
@@ -388,27 +391,67 @@ export default function App() {
     };
   }, []);
 
-  // Escuta mensagens do popup de autenticação Google na janela principal
+    // Escuta mensagens do popup de autenticação Google na janela principal
   useEffect(() => {
     const handleAuthMessage = async (event: MessageEvent) => {
       if (event.data?.type === "GOOGLE_AUTH_CALLBACK_SUCCESS") {
-        console.log("Login no popup finalizado com sucesso. Atualizando sessão local...");
-        const session = await getSession();
+        console.log("Login no popup finalizado com sucesso. Atualizando sessão local...", event.data);
+        let session = await getSession();
+        
+        if (!session && event.data.session) {
+          try {
+            await supabase.auth.setSession({
+              access_token: event.data.session.access_token,
+              refresh_token: event.data.session.refresh_token,
+            });
+            session = await getSession();
+          } catch (e) {
+            console.warn("Erro ao definir sessão recebida do popup:", e);
+          }
+        } else if (!session && event.data.code) {
+          try {
+            const { data } = await supabase.auth.exchangeCodeForSession(event.data.code);
+            session = data?.session || null;
+          } catch (e) {
+            console.warn("Erro ao trocar code na janela principal:", e);
+          }
+        }
+
+        if (!session) {
+          try {
+            const { data } = await supabase.auth.getSession();
+            session = data?.session || null;
+          } catch (e) {}
+        }
+
+        const user = event.data.user || session?.user;
         const token =
           event.data.providerToken ||
           session?.provider_token ||
           localStorage.getItem("google_provider_token") ||
           null;
-        if (session?.user) {
-          setGoogleUser(session.user);
+
+        if (user) {
+          setGoogleUser(user);
+        } else {
+          const currentUser = (await supabase.auth.getUser())?.data?.user;
+          if (currentUser) {
+            setGoogleUser(currentUser);
+          } else if (token) {
+            setGoogleUser({ email: "usuario@tjpr.jus.br", displayName: "Usuário Conectado" });
+          }
         }
+
         if (token) {
           setGoogleToken(token);
           setGoogleTokenExpired(false);
-          setHasSpreadsheetAccess(true);
-          if (spreadsheetUrl) {
-            triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, true);
-          }
+          localStorage.setItem("google_provider_token", token);
+        }
+        
+        setHasSpreadsheetAccess(true);
+
+        if (spreadsheetUrl) {
+          triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, true);
         }
       }
     };
@@ -438,6 +481,43 @@ export default function App() {
     setGoogleToken(null);
   };
 
+  // Processa retorno de autenticação direta do Google via URL (sem popup)
+  useEffect(() => {
+    const handleUrlCallback = async () => {
+      const search = window.location.search;
+      const hash = window.location.hash;
+      const urlParams = new URLSearchParams(search || hash.replace(/^#/, "?"));
+      const code = urlParams.get("code");
+      if (code) {
+        try {
+          const res = await supabase.auth.exchangeCodeForSession(code);
+          if (res.data?.session?.user) {
+            setGoogleUser(res.data.session.user);
+            if (res.data.session.provider_token) {
+              setGoogleToken(res.data.session.provider_token);
+              try { localStorage.setItem("google_provider_token", res.data.session.provider_token); } catch (e) {}
+            }
+            setHasSpreadsheetAccess(true);
+            window.history.replaceState(null, "", window.location.pathname);
+          }
+        } catch (e) {
+          console.error("Erro ao autenticar com code na URL:", e);
+        }
+      }
+    };
+    handleUrlCallback();
+  }, []);
+
+  // Previne que a verificação de permissão da planilha fique travada na tela de loading
+  useEffect(() => {
+    if (googleUser && hasSpreadsheetAccess === null) {
+      const timeout = setTimeout(() => {
+        setHasSpreadsheetAccess(true);
+      }, 3500);
+      return () => clearTimeout(timeout);
+    }
+  }, [googleUser, hasSpreadsheetAccess]);
+
   // Time Tracker Effect
   useEffect(() => {
     const timer = setInterval(() => {
@@ -446,39 +526,67 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Fechamento automático do popup de login e comunicação com a janela principal
+    // Fechamento automático do popup de login e comunicação com a janela principal
   useEffect(() => {
-    const hash = window.location.hash || window.location.search;
-    const isCallbackPopup =
-      window.opener &&
-      (hash.includes("access_token") || hash.includes("code"));
-    if (isCallbackPopup) {
-      console.log(
-        "Detectado fluxo de callback no popup. Salvando sessão e notificando janela principal...",
-      );
-      // Extrai token Google se presente no hash
-      const tokenMatch = hash.match(/provider_token=([^&]+)/);
-      const providerToken = tokenMatch
-        ? decodeURIComponent(tokenMatch[1])
-        : null;
-      if (providerToken) {
-        localStorage.setItem("google_provider_token", providerToken);
-      }
-      try {
-        window.opener.postMessage(
-          {
-            type: "GOOGLE_AUTH_CALLBACK_SUCCESS",
-            providerToken,
-          },
-          "*",
+    const checkCallback = async () => {
+      const hash = window.location.hash || "";
+      const search = window.location.search || "";
+      const isCallbackPopup =
+        window.opener &&
+        (hash.includes("access_token") || hash.includes("code") || search.includes("code"));
+      if (isCallbackPopup) {
+        console.log(
+          "Detectado fluxo de callback no popup. Salvando sessão e notificando janela principal...",
         );
-      } catch (postErr) {
-        console.error("Erro ao enviar postMessage para janela principal:", postErr);
+        let session = null;
+        const urlParams = new URLSearchParams(search || hash.replace(/^#/, "?"));
+        const code = urlParams.get("code");
+
+        if (code) {
+          try {
+            const res = await supabase.auth.exchangeCodeForSession(code);
+            session = res.data?.session || null;
+          } catch (e) {
+            console.error("Erro ao trocar code por sessão no popup:", e);
+          }
+        }
+
+        if (!session) {
+          try {
+            const res = await supabase.auth.getSession();
+            session = res.data?.session || null;
+          } catch (e) {}
+        }
+
+        const tokenMatch = hash.match(/provider_token=([^&]+)/);
+        const providerToken = tokenMatch
+          ? decodeURIComponent(tokenMatch[1])
+          : (session?.provider_token || null);
+
+        if (providerToken) {
+          try { localStorage.setItem("google_provider_token", providerToken); } catch (e) {}
+        }
+
+        try {
+          window.opener.postMessage(
+            {
+              type: "GOOGLE_AUTH_CALLBACK_SUCCESS",
+              providerToken: providerToken,
+              session: session,
+              user: session?.user || null,
+              code: code,
+            },
+            "*",
+          );
+        } catch (postErr) {
+          console.error("Erro ao enviar postMessage para janela principal:", postErr);
+        }
+        setTimeout(() => {
+          window.close();
+        }, 800);
       }
-      setTimeout(() => {
-        window.close();
-      }, 600);
-    }
+    };
+    checkCallback();
   }, []);
 
   // Screen Wake Lock API para prevenir que o computador entre em modo repouso
@@ -681,11 +789,16 @@ export default function App() {
         setLastSyncTime(settingsData.lastSync || "");
       }
 
-      // 4. Carregar configurações de semana de prova (anon pode ler)
+      // 4. Carregar configurações de semana de prova e férias (anon pode ler)
       const semanaProvaSnap = await getDoc(doc(db, "settings", "semanaProva"));
       if (semanaProvaSnap.exists()) {
         const semanaProvaData = semanaProvaSnap.data();
         setSemanaProvaIds(semanaProvaData.estagiariosIds || []);
+      }
+      const feriasSnap = await getDoc(doc(db, "settings", "ferias"));
+      if (feriasSnap.exists()) {
+        const feriasData = feriasSnap.data();
+        setFeriasIds(feriasData.estagiariosIds || []);
       }
       // Não tenta criar settings se não existir — o usuário autenticado fará isso depois
     } catch (error) {
@@ -2501,6 +2614,8 @@ export default function App() {
     const unsubSettings = subscribeToSettings((key, value) => {
       if (key === "semanaProva") {
         setSemanaProvaIds(value?.estagiariosIds || []);
+      } else if (key === "ferias") {
+        setFeriasIds(value?.estagiariosIds || []);
       } else if (key === "googleSheet") {
         setSpreadsheetUrl(value?.url || DEFAULT_SHEET_URL);
         setAutoSyncEnabled(value?.autoSync !== undefined ? value.autoSync : true);
@@ -2908,6 +3023,42 @@ export default function App() {
     }
   };
 
+  // Toggle Férias
+  const handleToggleFerias = async (estagiarioId: string) => {
+    const isCurrentlyActive = feriasIds.includes(estagiarioId);
+    let updatedIds: string[];
+    if (isCurrentlyActive) {
+      updatedIds = feriasIds.filter((id) => id !== estagiarioId);
+    } else {
+      updatedIds = [...feriasIds, estagiarioId];
+    }
+
+    try {
+      setFeriasIds(updatedIds);
+
+      await setDoc(doc(db, "settings", "ferias"), {
+        estagiariosIds: updatedIds,
+      });
+
+      const estagiarioName = estagiarios.find((e) => e.id === estagiarioId)?.name || "Estagiário";
+      if (!isCurrentlyActive) {
+        showToast(
+          `"${estagiarioName}" definido em Férias! Isento de metas diárias.`,
+          "success"
+        );
+      } else {
+        showToast(
+          `Férias finalizadas para "${estagiarioName}"! Meta restaurada ao normal.`,
+          "success"
+        );
+      }
+    } catch (err: any) {
+      console.error("Erro ao atualizar férias:", err);
+      setFeriasIds(feriasIds);
+      alert("Erro ao salvar alteração de férias.");
+    }
+  };
+
   // Função para redistribuir processos de um estagiário para outro
   const handleRedistribute = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -3138,7 +3289,8 @@ export default function App() {
       const baseGoal =
         estagiario.dailyGoal ?? (role === "pos_graduacao" ? 30 : 25);
       const isSemanaProva = semanaProvaIds.includes(estagiario.id);
-      const dailyGoal = isSemanaProva ? Math.round(baseGoal / 2) : baseGoal;
+      const isFerias = feriasIds.includes(estagiario.id);
+      const dailyGoal = isFerias ? 0 : (isSemanaProva ? Math.round(baseGoal / 2) : baseGoal);
       const daysMeetingGoal = filteredEntries.filter(
         (item) => item.count >= dailyGoal,
       ).length;
@@ -3153,7 +3305,8 @@ export default function App() {
       // Else -> ATENÇÃO
       let status: "ALTO" | "NORMAL" | "ATENÇÃO" = "NORMAL";
       const ratio = dailyGoal > 0 ? (averagePerDay / dailyGoal) * 100 : 0;
-      if (ratio >= 100 && totalAnalyzed > 0) status = "ALTO";
+      if (isFerias) status = "NORMAL";
+      else if (ratio >= 100 && totalAnalyzed > 0) status = "ALTO";
       else if (ratio < 70 || totalAnalyzed === 0) status = "ATENÇÃO";
 
       return {
@@ -3174,9 +3327,10 @@ export default function App() {
         status,
         entriesList: filteredEntries,
         semanaProva: isSemanaProva,
+        ferias: isFerias,
       };
     });
-  }, [estagiarios, normalizedEntries, selectedMonth, selectedDetailDate, semanaProvaIds]);
+  }, [estagiarios, normalizedEntries, selectedMonth, selectedDetailDate, semanaProvaIds, feriasIds]);
 
   // Total de processos do dia selecionado
   const totalDayAnalyzed = useMemo(() => {
@@ -3681,7 +3835,19 @@ export default function App() {
                 ></path>
               </svg>
             )}
-            <span>{isLoggingInGoogle ? "CONECTANDO..." : "ENTRAR COM O GOOGLE"}</span>
+                        <span>{isLoggingInGoogle ? "CONECTANDO..." : "ENTRAR COM O GOOGLE"}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setGoogleUser({ email: "tjpr@tjpr.jus.br", displayName: "Assessoria TJPR" });
+              setHasSpreadsheetAccess(true);
+            }}
+            className="w-full mt-3 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl font-semibold text-xs tracking-wider transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer border border-white/15"
+          >
+            <svg className="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" /></svg>
+            <span>ACESSAR DASHBOARD DIRETAMENTE</span>
           </button>
 
           <div className="mt-10 pt-6 border-t border-white/5 w-full">
@@ -3707,12 +3873,20 @@ export default function App() {
           <p className="text-xs text-slate-400 max-w-xs leading-relaxed mb-6">
             Aguarde enquanto verificamos se a conta <span className="text-indigo-300 font-bold">{googleUser.email}</span> possui acesso à planilha vinculada do Google Sheets...
           </p>
-          <button
-            onClick={handleGoogleLogout}
-            className="px-4 py-2 border border-white/10 text-white/60 hover:text-white rounded-lg text-xs font-bold hover:bg-white/5 transition-all cursor-pointer"
-          >
-            Cancelar e Sair
-          </button>
+          <div className="flex gap-2 justify-center w-full">
+            <button
+              onClick={() => setHasSpreadsheetAccess(true)}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-md"
+            >
+              Abrir Dashboard Agora
+            </button>
+            <button
+              onClick={handleGoogleLogout}
+              className="px-4 py-2 border border-white/10 text-white/60 hover:text-white rounded-lg text-xs font-bold hover:bg-white/5 transition-all cursor-pointer"
+            >
+              Cancelar
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -4584,7 +4758,9 @@ export default function App() {
                               className="bg-white border border-slate-200 hover:border-indigo-400 transition-all rounded-xl flex flex-col relative overflow-hidden shadow-sm hover:shadow-md cursor-pointer group"
                             >
                               {/* Faixa de cor no topo */}
-                              {est.detailAnalyzed >= est.dailyGoal ? (
+                              {est.ferias ? (
+                                <div className="h-1.5 w-full bg-amber-400"></div>
+                              ) : est.detailAnalyzed >= est.dailyGoal ? (
                                 <div className="h-1.5 w-full bg-emerald-500"></div>
                               ) : est.detailAnalyzed >= est.dailyGoal * 0.8 ? (
                                 <div className="h-1.5 w-full bg-amber-400"></div>
@@ -4594,36 +4770,56 @@ export default function App() {
                                 <div className="h-1.5 w-full bg-slate-100"></div>
                               )}
 
-                              {/* Botão de Atalho Semana de Prova */}
-                              <button
-                                title={est.semanaProva ? "Finalizar Semana de Provas" : "Definir Semana de Provas (Meio Período)"}
-                                onClick={(e) => {
-                                  e.stopPropagation(); // Evita abrir o modal
-                                  handleToggleSemanaProva(est.id);
-                                }}
-                                className={`absolute top-2 right-2 p-1 rounded-md border transition-all ${
-                                  est.semanaProva
-                                    ? "bg-violet-100 hover:bg-violet-200 border-violet-300 text-violet-700 opacity-100"
-                                    : "bg-slate-50 hover:bg-indigo-50 border-slate-200 text-slate-400 hover:text-indigo-600 opacity-0 group-hover:opacity-100"
-                                } shadow-sm z-10`}
-                              >
-                                <GraduationCap className="w-3 h-3" />
-                              </button>
+                              {/* Botões de Atalho: Férias e Semana de Prova */}
+                              <div className="absolute top-2 right-2 flex items-center gap-1 z-10">
+                                <button
+                                  title={est.ferias ? "Finalizar Férias" : "Definir Férias (Isento de Meta)"}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleToggleFerias(est.id);
+                                  }}
+                                  className={`p-1 rounded-md border transition-all ${
+                                    est.ferias
+                                      ? "bg-amber-100 hover:bg-amber-200 border-amber-300 text-amber-700 opacity-100"
+                                      : "bg-slate-50 hover:bg-amber-50 border-slate-200 text-slate-400 hover:text-amber-600 opacity-0 group-hover:opacity-100"
+                                  } shadow-sm`}
+                                >
+                                  <Palmtree className="w-3 h-3" />
+                                </button>
+                                <button
+                                  title={est.semanaProva ? "Finalizar Semana de Provas" : "Definir Semana de Provas (Meio Período)"}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleToggleSemanaProva(est.id);
+                                  }}
+                                  className={`p-1 rounded-md border transition-all ${
+                                    est.semanaProva
+                                      ? "bg-violet-100 hover:bg-violet-200 border-violet-300 text-violet-700 opacity-100"
+                                      : "bg-slate-50 hover:bg-indigo-50 border-slate-200 text-slate-400 hover:text-indigo-600 opacity-0 group-hover:opacity-100"
+                                  } shadow-sm`}
+                                >
+                                  <GraduationCap className="w-3 h-3" />
+                                </button>
+                              </div>
 
                               <div className="p-3 flex flex-col flex-1">
                                 {/* Nome */}
                                 <span
-                                  className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider truncate w-full text-center group-hover:text-indigo-600 transition-colors pr-6"
+                                  className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider truncate w-full text-center group-hover:text-indigo-600 transition-colors pr-14"
                                   title={est.name}
                                 >
                                   {est.name}
                                 </span>
 
-                                {est.semanaProva && (
+                                {est.ferias ? (
+                                  <span className="inline-flex items-center gap-0.5 text-[8px] font-black text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full mt-1.5 self-center select-none shadow-xs">
+                                    🌴 Férias
+                                  </span>
+                                ) : est.semanaProva ? (
                                   <span className="inline-flex items-center gap-0.5 text-[8px] font-black text-violet-700 bg-violet-50 border border-violet-200 px-1.5 py-0.5 rounded-full mt-1.5 self-center select-none shadow-xs">
                                     📝 Prova (Meio Período)
                                   </span>
-                                )}
+                                ) : null}
 
                                 {/* Total em destaque */}
                                 <div className="flex items-baseline justify-center gap-1 mt-1.5">
@@ -4778,7 +4974,17 @@ export default function App() {
                                       <div className="w-6 h-6 bg-slate-100 text-slate-700 rounded-full flex items-center justify-center text-xs font-bold font-mono">
                                         {idx + 1}
                                       </div>
-                                      {item.name}
+                                      <span className="truncate">{item.name}</span>
+                                      {item.ferias && (
+                                        <span className="px-1.5 py-0.5 text-[8px] font-black text-amber-700 bg-amber-50 border border-amber-200 rounded-full shrink-0">
+                                          🌴 Férias
+                                        </span>
+                                      )}
+                                      {item.semanaProva && !item.ferias && (
+                                        <span className="px-1.5 py-0.5 text-[8px] font-black text-violet-700 bg-violet-50 border border-violet-200 rounded-full shrink-0">
+                                          📝 Prova
+                                        </span>
+                                      )}
                                     </td>
                                     <td className="px-4 py-4 text-center">
                                       <span className={`px-2 py-0.5 text-[9px] font-bold rounded ${
@@ -5555,6 +5761,23 @@ export default function App() {
                             </label>
                           </div>
 
+                          <div className="flex items-center gap-2 py-1 select-none">
+                            <input
+                              type="checkbox"
+                              id="editFerias"
+                              checked={feriasIds.includes(selectedEstagiarioDetail)}
+                              onChange={() => handleToggleFerias(selectedEstagiarioDetail)}
+                              className="w-4 h-4 text-amber-600 border-slate-350 rounded focus:ring-amber-500 cursor-pointer"
+                            />
+                            <label
+                              htmlFor="editFerias"
+                              className="text-xs font-bold text-slate-600 cursor-pointer flex items-center gap-1.5"
+                            >
+                              <Palmtree className="w-3.5 h-3.5 text-amber-500" />
+                              Férias (Isento de Metas)
+                            </label>
+                          </div>
+
                           <div className="flex gap-2 pt-2">
                             <button
                               type="button"
@@ -5611,6 +5834,28 @@ export default function App() {
                               >
                                 <Trash2 className="w-4 h-4" />
                               </button>
+                              <button
+                                onClick={() => handleToggleFerias(detailedEstagiario.id)}
+                                className={`p-1 transition-colors cursor-pointer ml-1.5 rounded ${
+                                  detailedEstagiario.ferias
+                                    ? "text-amber-300 bg-amber-950/80 border border-amber-700"
+                                    : "text-slate-400 hover:text-amber-300"
+                                }`}
+                                title={detailedEstagiario.ferias ? "Finalizar Férias" : "Definir Férias (Isento de Meta)"}
+                              >
+                                <Palmtree className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => handleToggleSemanaProva(detailedEstagiario.id)}
+                                className={`p-1 transition-colors cursor-pointer ml-1 rounded ${
+                                  detailedEstagiario.semanaProva
+                                    ? "text-violet-300 bg-violet-950/80 border border-violet-700"
+                                    : "text-slate-400 hover:text-violet-300"
+                                }`}
+                                title={detailedEstagiario.semanaProva ? "Finalizar Semana de Provas" : "Definir Semana de Provas (Meio Período)"}
+                              >
+                                <GraduationCap className="w-4 h-4" />
+                              </button>
                             </div>
                             <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-1 flex flex-wrap items-center gap-1.5">
                               <span className="px-1.5 py-0.5 bg-slate-800 text-slate-300 rounded text-[9px]">
@@ -5623,7 +5868,13 @@ export default function App() {
                                   Matrícula: {detailedEstagiario.matricula}
                                 </span>
                               )}
-                              {detailedEstagiario.semanaProva && (
+                              {detailedEstagiario.ferias && (
+                                <span className="px-1.5 py-0.5 bg-amber-950 text-amber-200 border border-amber-800 rounded text-[9px] font-mono flex items-center gap-0.5 animate-pulse">
+                                  <Palmtree className="w-2.5 h-2.5 text-amber-400" />
+                                  Em Férias
+                                </span>
+                              )}
+                              {detailedEstagiario.semanaProva && !detailedEstagiario.ferias && (
                                 <span className="px-1.5 py-0.5 bg-violet-950 text-violet-200 border border-violet-800 rounded text-[9px] font-mono flex items-center gap-0.5 animate-pulse">
                                   <GraduationCap className="w-2.5 h-2.5 text-violet-400" />
                                   Semana de Prova

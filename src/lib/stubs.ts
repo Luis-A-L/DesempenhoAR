@@ -367,10 +367,8 @@ export const initAuth = (
       }
       const token = session.provider_token ?? localStorage.getItem('google_provider_token') ?? null
       onLogin(session.user, token)
-    } else {
-      if (event === 'SIGNED_OUT') {
-        localStorage.removeItem('google_provider_token')
-      }
+    } else if (event === 'SIGNED_OUT') {
+      localStorage.removeItem('google_provider_token')
       onLogout()
     }
   })
