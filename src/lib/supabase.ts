@@ -329,7 +329,8 @@ export const fetchSheetDataDirectly = async (url: string, token: string | null):
             const errBody = await response.json().catch(() => ({}))
             const errMsg = errBody?.error || `Erro HTTP ${response.status}`
             if (response.status === 401 || errBody.action === "LOGOUT") {
-                throw Object.assign(new Error("Sua sessão expirou."), { status: 401, action: "LOGOUT" })
+                localStorage.removeItem('google_provider_token')
+                throw Object.assign(new Error("Sua sessão com o Google expirou."), { status: 401, action: "LOGOUT" })
             }
             if (response.status === 403) {
                 throw Object.assign(new Error(errMsg), {

@@ -151,6 +151,8 @@ async function startServer() {
         }
       }
 
+      let apiAuthError: any = null;
+
       // Se houver token de acesso, vamos usar a API oficial do Google Sheets v4 para obter as abas reais!
       const authHeader = req.headers.authorization;
       const accessToken = token || (authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null);
@@ -246,9 +248,12 @@ async function startServer() {
             const msg = parts.slice(2).join(":");
 
             if (status === 401) {
-              return res.status(401).json({ error: "Sua conexão com o Google expirou. É necessário fazer login novamente.", action: "LOGOUT" });
-            }
-            if (status === 403) {
+              apiAuthError = {
+                status: 401,
+                userMessage: "Sua conexão com o Google expirou. É necessário fazer login novamente.",
+                action: "LOGOUT",
+              };
+            } else if (status === 403) {
               const normalizedMsg = msg.toLowerCase();
               const isScopeError = normalizedMsg.includes("scope") || normalizedMsg.includes("insufficient") || normalizedMsg.includes("authentication credentials");
               const isApiDisabled = normalizedMsg.includes("has not been used") || normalizedMsg.includes("disabled") || normalizedMsg.includes("enable it");
@@ -260,13 +265,17 @@ async function startServer() {
               } else if (normalizedMsg.includes("permission") || normalizedMsg.includes("forbidden") || normalizedMsg.includes("caller")) {
                 userMessage = "A conta Google conectada não tem acesso a esta planilha. Confirme se é exatamente o mesmo e-mail que abre a planilha no Google Sheets.";
               }
-              return res.status(403).json({ error: userMessage, googleError: msg, action: isScopeError ? "REAUTH" : undefined });
-            }
-            if (msg.toLowerCase().includes("quota") || status === 429) {
+              apiAuthError = {
+                status: 403,
+                userMessage,
+                googleError: msg,
+                action: isScopeError ? "REAUTH" : undefined,
+              };
+            } else if (msg.toLowerCase().includes("quota") || status === 429) {
               return res.status(429).json({ error: "O limite de leitura em tempo real do Google foi temporariamente atingido devido a muitos pedidos simultâneos na sua conta. O sistema continuará tentando em alguns segundos." });
             }
           }
-          // Prossegue para o fallback público se falhar
+          // Prossegue para o fallback se falhar a API oficial
         }
       }
 
@@ -324,6 +333,13 @@ async function startServer() {
       }));
 
       if (Object.keys(sheetsResultMap).length === 0) {
+        if (apiAuthError) {
+          return res.status(apiAuthError.status).json({
+            error: apiAuthError.userMessage || "Sua conexão com o Google expirou. É necessário fazer login novamente.",
+            action: apiAuthError.action || "LOGOUT",
+            googleError: apiAuthError.googleError,
+          });
+        }
         return res.status(400).json({ 
           error: "Não foi possível acessar a planilha de forma pública. Por favor, conecte com o Google para autorizar o acesso à planilha vinculada à sua conta." 
         });

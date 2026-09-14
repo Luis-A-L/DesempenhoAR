@@ -1861,7 +1861,9 @@ export default function App() {
       if (err.status === 401 || err.status === 403) {
         setHasSpreadsheetAccess(false);
         if (err.status === 401) {
+          setGoogleToken(null);
           setGoogleTokenExpired(true);
+          localStorage.removeItem("google_provider_token");
           console.warn("Detectado token do Google expirado ou ausente (401).");
           if (showFeedback) {
             handleGoogleLogin();
@@ -2261,6 +2263,49 @@ export default function App() {
 
       if (entriesToUpsert.length > 0) {
         await batchUpsertEntries(entriesToUpsert);
+      }
+
+      // Atualiza o estado local 'entries' imediatamente para refletir na dashboard sem delay e sem F5
+      if (validEntries.length > 0) {
+        setEntries((prev) => {
+          const map = new Map(prev.map((e) => [`${e.estagiarioId}_${e.date}`, e]));
+          validEntries.forEach((newEntry) => {
+            const key = `${newEntry.estagiarioId}_${newEntry.date}`;
+            const existing = map.get(key);
+            if (existing) {
+              map.set(key, {
+                ...existing,
+                count: newEntry.count,
+                typeBreakdown: newEntry.typeBreakdown || existing.typeBreakdown,
+              });
+            } else {
+              map.set(key, {
+                id: `synced_${newEntry.estagiarioId}_${newEntry.date}`,
+                ...newEntry,
+              });
+            }
+          });
+          return Array.from(map.values());
+        });
+      }
+
+      // Atualiza o estado local de processos detalhados imediatamente
+      if (detailedProcesses && detailedProcesses.length > 0) {
+        setAllDetailedProcesses((prev) => {
+          const next = { ...prev };
+          detailedProcesses.forEach((p) => {
+            if (!p.estagiarioId || !p.date || !p.origem) return;
+            const key = p.numeroProcesso || `proc_${p.estagiarioId}_${p.date}_${Math.random()}`;
+            if (!next[p.estagiarioId]) {
+              next[p.estagiarioId] = {};
+            }
+            next[p.estagiarioId][key] = {
+              origem: p.origem,
+              date: p.date,
+            };
+          });
+          return next;
+        });
       }
 
       // 4. Salvar configurações da planilha

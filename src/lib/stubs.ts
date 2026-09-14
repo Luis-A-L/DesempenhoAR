@@ -70,7 +70,7 @@ export const getDocs = async (ref: CollectionRef | QueryRef): Promise<{
   while (hasMore) {
     let q = supabase.from(table).select('*')
     if (table === 'productivity_entries') {
-      q = q.range(offset, offset + limit - 1) as any
+      q = q.order('id').range(offset, offset + limit - 1) as any
     }
     for (const f of filters) {
       if (f?.column && f?.value !== undefined) {
