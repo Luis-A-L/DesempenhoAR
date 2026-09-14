@@ -570,9 +570,9 @@ export default function App() {
 
 
   // Fetch Data
-  const fetchData = async () => {
+  const fetchData = async (silent: boolean = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
 
       // 1. Carregar estagiários
       const SKIP_IDS = new Set(["total", "livre_1", "pietro", "gustavo_dias", ...EXCLUDED_ESTAGIARIO_IDS]);
@@ -691,9 +691,33 @@ export default function App() {
     } catch (error) {
       console.error("Erro ao carregar dados do Supabase:", error);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
+
+  // Carregar processos detalhados de todos os estagiários para o mês selecionado
+  const fetchAllDetailedProcesses = async (
+    currentEstags: Estagiario[] = estagiariosRef.current,
+    month: string = selectedMonth
+  ) => {
+    const targetEstags = currentEstags && currentEstags.length > 0 ? currentEstags : estagiariosRef.current;
+    if (!targetEstags || targetEstags.length === 0) return;
+    const result: Record<string, Record<string, { origem: string; date: string }>> = {};
+    const promises = targetEstags.map(async (est) => {
+      try {
+        const key = `proc_time_${est.id}_${month}`;
+        const snap = await getDoc(doc(db, "settings", key));
+        if (snap.exists()) {
+          result[est.id] = snap.data() || {};
+        }
+      } catch (err) {
+        console.error(`Erro ao buscar processos detalhados de ${est.id}:`, err);
+      }
+    });
+    await Promise.all(promises);
+    setAllDetailedProcesses(result);
+  };
+
 
 
 
@@ -1802,52 +1826,34 @@ export default function App() {
       setSheetsMessage(parseResult.message);
       setSheetSyncError("");
 
-      const existingEstagIds = new Set(estagiariosRef.current.map((e) => e.id));
-      const ignoredIds = ignoredNewEstagiariosRef.current;
+      // Salva no Supabase — sincronização manual salva tudo, automática salva só o dia atual
+      let finalEntriesToSave = parseResult.entries;
+      let finalDetailedProcesses = parseResult.detailedProcesses || [];
+      if (!showFeedback) {
+        const todayStr = getCurrentDate();
+        finalEntriesToSave = parseResult.entries.filter(
+          (e) => e.date === todayStr
+        );
+        finalDetailedProcesses = (parseResult.detailedProcesses || []).filter(
+          (p) => p.date === todayStr
+        );
+      }
 
-      // Identifica se há estagiários novos que ainda não estão no sistema nem foram previamente ignorados
-      const candidateNewEstagiarios = (parseResult.estagiariosDetailedToCreate || []).filter(
-        (e) => e && e.id && !existingEstagIds.has(e.id) && !EXCLUDED_ESTAGIARIO_IDS.has(e.id) && !ignoredIds.has(e.id)
-      );
-
-      // Entradas dos estagiários JÁ cadastrados e aprovados
-      const approvedEntriesToSave = parseResult.entries.filter(
-        (e) => existingEstagIds.has(e.estagiarioId) && !ignoredIds.has(e.estagiarioId)
-      );
-      const approvedDetailedProcesses = (parseResult.detailedProcesses || []).filter(
-        (p) => existingEstagIds.has(p.estagiarioId) && !ignoredIds.has(p.estagiarioId)
-      );
-
-      // Salva imediatamente os dados dos estagiários já existentes em tempo real
       await saveSyncedDataToFirestore(
-        approvedEntriesToSave,
-        [],
+        finalEntriesToSave,
+        parseResult.estagiariosCreated,
         urlStr,
         !showFeedback,
-        [],
-        approvedDetailedProcesses,
+        parseResult.estagiariosDetailedToCreate || [],
+        finalDetailedProcesses,
       );
-
-      // Se houver novos estagiários detectados, abre o modal de confirmação para o usuário decidir
-      if (candidateNewEstagiarios.length > 0) {
-        setPendingNewEstagiarios(candidateNewEstagiarios);
-        setSelectedNewEstagiarioIds(new Set(candidateNewEstagiarios.map((e) => e.id)));
-        setPendingSyncEntries(parseResult.entries);
-        setPendingDetailedProcesses(parseResult.detailedProcesses || []);
-        setPendingSheetUrl(urlStr);
-        setIsNewEstagiariosModalOpen(true);
-      }
 
       const endTime = Date.now();
       const duration = (endTime - startTime) / 1000;
       setLastSyncDuration(duration);
 
       if (showFeedback) {
-        if (candidateNewEstagiarios.length > 0) {
-          showToast(`Sincronização concluída! Foram detectados ${candidateNewEstagiarios.length} novo(s) estagiário(s) na planilha.`, "info");
-        } else {
-          showToast(parseResult.message || "Planilha sincronizada com sucesso!", "success");
-        }
+        showToast(parseResult.message || "Planilha sincronizada com sucesso!", "success");
       }
     } catch (err: any) {
       console.error(err);
@@ -2236,7 +2242,9 @@ export default function App() {
       }
 
       // 2. Upsert entradas de produtividade em massa
-      const validEntries = entriesToSave.filter((e) => e && e.estagiarioId && e.date);
+      const validEntries = entriesToSave.filter(
+        (e) => e && e.estagiarioId && e.date && !EXCLUDED_ESTAGIARIO_IDS.has(e.estagiarioId)
+      );
       
       // Otimização de gravação: Filtrar e reter somente as entradas cujas quantidades mudaram ou novas entradas
       const entriesToUpsert: Omit<ProductivityEntry, "id">[] = [];
@@ -2253,32 +2261,6 @@ export default function App() {
 
       if (entriesToUpsert.length > 0) {
         await batchUpsertEntries(entriesToUpsert);
-      }
-
-      // Atualiza o estado local 'entries' diretamente com os novos valores consolidados
-      // Garante que o dashboard, gráficos e tabelas atualizem instantaneamente sem precisar de F5
-      if (validEntries.length > 0) {
-        setEntries((prev) => {
-          const next = [...prev];
-          validEntries.forEach((newEntry) => {
-            const idx = next.findIndex(
-              (e) => e.estagiarioId === newEntry.estagiarioId && e.date === newEntry.date
-            );
-            if (idx !== -1) {
-              next[idx] = {
-                ...next[idx],
-                count: newEntry.count,
-                typeBreakdown: newEntry.typeBreakdown || next[idx].typeBreakdown,
-              };
-            } else {
-              next.push({
-                id: `synced_${newEntry.estagiarioId}_${newEntry.date}`,
-                ...newEntry,
-              });
-            }
-          });
-          return next;
-        });
       }
 
       // 4. Salvar configurações da planilha
@@ -2310,12 +2292,12 @@ export default function App() {
         console.error("Failed to write sync diagnostics:", diagErr);
       }
 
-      // O mês selecionado não é mais alterado automaticamente no final da sincronização para respeitar a navegação do usuário e manter o mês atual selecionado.
+      // 5. Recarrega os dados completos diretamente do Supabase e atualiza o estado local
+      // Isso garante que o dashboard, gráficos e tabelas atualizem instantaneamente sem precisar de F5
+      await fetchData(true);
+      await fetchAllDetailedProcesses();
 
       if (!isStartupSilent) {
-        alert(
-          `Carregamento concluído! Sincronizados ${entriesToSave.length} lançamentos de produtividade. ${estagiariosToUpsert.length > 0 ? `${estagiariosToUpsert.length} estagiários sincronizados` : ""}.`,
-        );
         setIsSheetsModalOpen(false);
         setPasteDataText("");
         setPreviewEntries([]);
@@ -2518,26 +2500,9 @@ export default function App() {
     setDetailTab("month"); // Sempre abre na aba mensal por padrao
   }, [selectedEstagiarioDetail, selectedMonth]);
 
-  // Carregar processos detalhados de todos os estagiários para o mês selecionado (usado no gráfico de rosça)
+  // Carregar processos detalhados de todos os estagiários para o mês selecionado (usado no gráfico de rosca)
   useEffect(() => {
-    const fetchAllDetailedProcesses = async () => {
-      if (estagiarios.length === 0) return;
-      const result: Record<string, Record<string, { origem: string; date: string }>> = {};
-      const promises = estagiarios.map(async (est) => {
-        try {
-          const key = `proc_time_${est.id}_${selectedMonth}`;
-          const snap = await getDoc(doc(db, "settings", key));
-          if (snap.exists()) {
-            result[est.id] = snap.data() || {};
-          }
-        } catch (err) {
-          console.error(`Erro ao buscar processos detalhados de ${est.id}:`, err);
-        }
-      });
-      await Promise.all(promises);
-      setAllDetailedProcesses(result);
-    };
-    fetchAllDetailedProcesses();
+    fetchAllDetailedProcesses(estagiarios, selectedMonth);
   }, [estagiarios, selectedMonth]);
 
   // Sincronização automática dinâmica ao iniciar o aplicativo e contínua:
