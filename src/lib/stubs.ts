@@ -301,7 +301,10 @@ export const batchUpsertEstagiarios = async (items: Estagiario[]): Promise<void>
     .from('estagiarios')
     .upsert(rows, { onConflict: 'id' })
 
-  if (error) console.error('Erro no batch upsert de estagiarios:', error)
+  if (error) {
+    console.error('Erro no batch upsert de estagiarios:', error)
+    throw error
+  }
 }
 
 export const batchUpsertEntries = async (items: Omit<ProductivityEntry, 'id'>[]): Promise<void> => {
@@ -320,7 +323,10 @@ export const batchUpsertEntries = async (items: Omit<ProductivityEntry, 'id'>[])
       .from('productivity_entries')
       .upsert(chunk, { onConflict: 'estagiario_id,date' })
 
-    if (error) console.error('Erro no batch upsert de entries:', error)
+    if (error) {
+      console.error('Erro no batch upsert de entries:', error)
+      throw error
+    }
   }
 }
 

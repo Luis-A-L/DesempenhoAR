@@ -89,6 +89,41 @@ const getGoalStatus = (count: number, goal: number): GoalStatus => {
   return ratio >= 1 ? "green" : ratio >= 0.7 ? "yellow" : "red";
 };
 
+type StatusPeriodType = "ferias" | "semanaProva";
+
+type StatusPeriod = {
+  id: string;
+  estagiarioId: string;
+  type: StatusPeriodType;
+  startDate: string;
+  endDate: string | null;
+};
+
+const formatDatePt = (date: string) =>
+  date ? date.split("-").reverse().join("/") : "";
+
+const countBusinessDaysInclusive = (startDate: string, endDate: string) => {
+  if (!startDate || !endDate || startDate > endDate) return 0;
+
+  const start = new Date(`${startDate}T12:00:00`);
+  const end = new Date(`${endDate}T12:00:00`);
+  let count = 0;
+  for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+    const day = cursor.getDay();
+    if (day !== 0 && day !== 6) count++;
+  }
+  return count;
+};
+
+const getMonthBounds = (month: string) => {
+  const [year, monthNumber] = month.split("-").map(Number);
+  const lastDay = new Date(year, monthNumber, 0).getDate();
+  return {
+    start: `${year}-${String(monthNumber).padStart(2, "0")}-01`,
+    end: `${year}-${String(monthNumber).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`,
+  };
+};
+
 const EXCLUDED_ESTAGIARIO_IDS = new Set(["iasmin", "victoria"]);
 const SOFIA_FALLBACK: Estagiario = {
   id: "sofia",
@@ -246,6 +281,13 @@ export default function App() {
 
   const [semanaProvaIds, setSemanaProvaIds] = useState<string[]>([]);
   const [feriasIds, setFeriasIds] = useState<string[]>([]);
+  const [statusPeriods, setStatusPeriods] = useState<StatusPeriod[]>([]);
+  const [periodDialog, setPeriodDialog] = useState<{
+    estagiarioId: string;
+    type: StatusPeriodType;
+  } | null>(null);
+  const [periodStartDate, setPeriodStartDate] = useState<string>("");
+  const [periodEndDate, setPeriodEndDate] = useState<string>("");
 
   const [previewEntries, setPreviewEntries] = useState<
     Omit<ProductivityEntry, "id">[]
@@ -282,6 +324,9 @@ export default function App() {
   }, [ignoredNewEstagiarios]);
 
   const syncingSheetsRef = React.useRef(syncingSheets);
+  // Bloqueio síncrono: setState só é aplicado no próximo render e permitia
+  // que o callback OAuth, o boot e o efeito do token iniciassem 3 syncs juntos.
+  const syncInFlightRef = React.useRef(false);
   useEffect(() => {
     syncingSheetsRef.current = syncingSheets;
   }, [syncingSheets]);
@@ -394,6 +439,7 @@ export default function App() {
     // Escuta mensagens do popup de autenticação Google na janela principal
   useEffect(() => {
     const handleAuthMessage = async (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
       if (event.data?.type === "GOOGLE_AUTH_CALLBACK_SUCCESS") {
         console.log("Login no popup finalizado com sucesso. Atualizando sessão local...", event.data);
         let session = await getSession();
@@ -437,8 +483,8 @@ export default function App() {
           const currentUser = (await supabase.auth.getUser())?.data?.user;
           if (currentUser) {
             setGoogleUser(currentUser);
-          } else if (token) {
-            setGoogleUser({ email: "usuario@tjpr.jus.br", displayName: "Usuário Conectado" });
+          } else {
+            return;
           }
         }
 
@@ -511,9 +557,7 @@ export default function App() {
   // Previne que a verificação de permissão da planilha fique travada na tela de loading
   useEffect(() => {
     if (googleUser && hasSpreadsheetAccess === null) {
-      const timeout = setTimeout(() => {
-        setHasSpreadsheetAccess(true);
-      }, 3500);
+      const timeout = setTimeout(() => setHasSpreadsheetAccess(true), 3500);
       return () => clearTimeout(timeout);
     }
   }, [googleUser, hasSpreadsheetAccess]);
@@ -790,15 +834,60 @@ export default function App() {
       }
 
       // 4. Carregar configurações de semana de prova e férias (anon pode ler)
+      let semanaProvaDataIds: string[] = [];
+      let feriasDataIds: string[] = [];
       const semanaProvaSnap = await getDoc(doc(db, "settings", "semanaProva"));
       if (semanaProvaSnap.exists()) {
         const semanaProvaData = semanaProvaSnap.data();
-        setSemanaProvaIds(semanaProvaData.estagiariosIds || []);
+        semanaProvaDataIds = semanaProvaData.estagiariosIds || [];
+        setSemanaProvaIds(semanaProvaDataIds);
       }
       const feriasSnap = await getDoc(doc(db, "settings", "ferias"));
       if (feriasSnap.exists()) {
         const feriasData = feriasSnap.data();
-        setFeriasIds(feriasData.estagiariosIds || []);
+        feriasDataIds = feriasData.estagiariosIds || [];
+        setFeriasIds(feriasDataIds);
+      }
+      const statusPeriodsSnap = await getDoc(doc(db, "settings", "statusPeriods"));
+      if (statusPeriodsSnap.exists()) {
+        const statusPeriodsData = statusPeriodsSnap.data();
+        setStatusPeriods(
+          Array.isArray(statusPeriodsData.periods)
+            ? statusPeriodsData.periods.filter(
+                (period: StatusPeriod) =>
+                  period &&
+                  period.id &&
+                  period.estagiarioId &&
+                  (period.type === "ferias" || period.type === "semanaProva") &&
+                  period.startDate,
+              )
+            : [],
+        );
+      } else {
+        // Migra os status antigos, que não tinham datas, para o mês corrente
+        // sem permitir que continuem automaticamente no mês seguinte.
+        const currentMonth = getCurrentMonth();
+        const monthBounds = getMonthBounds(currentMonth);
+        const legacyPeriods: StatusPeriod[] = [
+          ...semanaProvaDataIds.map((estagiarioId) => ({
+            id: `legacy_semana_${estagiarioId}_${currentMonth}`,
+            estagiarioId,
+            type: "semanaProva" as const,
+            startDate: monthBounds.start,
+            endDate: monthBounds.end,
+          })),
+          ...feriasDataIds.map((estagiarioId) => ({
+            id: `legacy_ferias_${estagiarioId}_${currentMonth}`,
+            estagiarioId,
+            type: "ferias" as const,
+            startDate: monthBounds.start,
+            endDate: monthBounds.end,
+          })),
+        ];
+        setStatusPeriods(legacyPeriods);
+        if (legacyPeriods.length > 0) {
+          await setDoc(doc(db, "settings", "statusPeriods"), { periods: legacyPeriods });
+        }
       }
       // Não tenta criar settings se não existir — o usuário autenticado fará isso depois
     } catch (error) {
@@ -839,6 +928,7 @@ export default function App() {
     rawData: string | { [key: string]: string },
     currentEstagiarios: Estagiario[],
     targetControleSheetName?: string,
+    targetMonths?: string[],
   ) => {
     let diagDetalhado = false;
     let diagTypesRowIdx = -1;
@@ -858,6 +948,27 @@ export default function App() {
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
         .trim();
+
+    const NON_ESTAGIARIO_LABELS = new Set([
+      "vm",
+      "total",
+      "geral",
+      "data",
+      "dia",
+      "mes",
+      "mês",
+    ]);
+
+    const isValidEstagiarioHeader = (value: string) => {
+      const normalized = normalizeText(value);
+      if (!normalized || NON_ESTAGIARIO_LABELS.has(normalized)) return false;
+
+      // Datas de fechamento/mês (ex.: 31/07, 31/08/2026) não são usuários.
+      if (/^\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?$/.test(normalized)) return false;
+      if (/^\d{4}[\/-]\d{1,2}[\/-]\d{1,2}$/.test(normalized)) return false;
+
+      return true;
+    };
 
     const findEstagiarioId = (name: string): string | null => {
       const normName = normalizeText(name);
@@ -965,6 +1076,13 @@ export default function App() {
       if (iso === "2026-06-22") return null; // Ignora o dia 22 de junho de 2026 na sincronização
       return iso;
     };
+
+    const isDateInSyncScope = (isoDate: string | null) =>
+      Boolean(
+        isoDate &&
+        isoDate >= "2026-04-01" &&
+        (!targetMonths || targetMonths.includes(isoDate.substring(0, 7))),
+      );
 
     if (!rawData) {
       return {
@@ -1095,6 +1213,7 @@ export default function App() {
 
           const rawName = cells[nameColIdx];
           if (!rawName || rawName === "Nome") continue;
+          if (!isValidEstagiarioHeader(rawName)) continue;
 
           const rawMatricula =
             matriculaColIdx !== -1 && matriculaColIdx < cells.length
@@ -1177,6 +1296,13 @@ export default function App() {
     });
 
     const parsedEntries: Omit<ProductivityEntry, "id">[] = [];
+    const individualParsedEntries: Omit<ProductivityEntry, "id">[] = [];
+    const individualParsedDetailedProcesses: Array<{
+      estagiarioId: string;
+      date: string;
+      numeroProcesso: string;
+      origem: string;
+    }> = [];
 
     const findEstagiarioIdLocal = (name: string): string | null => {
       const normName = normalizeText(name);
@@ -1198,6 +1324,7 @@ export default function App() {
     const individualEstagiarioIds = new Set<string>();
 
     candidateIndividualSheets.forEach(({ name, content }) => {
+      if (!isValidEstagiarioHeader(name)) return;
       const estagId = findEstagiarioIdLocal(name);
       if (estagId) {
         individualSheetsProcessed.push({ estagiarioId: estagId, content, name });
@@ -1254,7 +1381,7 @@ export default function App() {
         // 1. DATA: Campo obrigatório 1
         const rawDate = (row[dateColIdx] || "").trim();
         const isoDate = parseDateToISO(rawDate);
-        if (!isoDate || isoDate < "2026-04-01") continue;
+        if (!isDateInSyncScope(isoDate)) continue;
 
         // 2. NÚMERO DO PROCESSO: Campo obrigatório 2 (não pode ser vazio, nem traço, deve conter dígitos)
         const rawProc = procColIdx !== -1 && procColIdx < row.length ? row[procColIdx].trim() : "";
@@ -1272,14 +1399,14 @@ export default function App() {
 
         const validOrigem = rawOrigem.toUpperCase();
 
-        parsedEntries.push({
+        individualParsedEntries.push({
           estagiarioId,
           date: isoDate,
           count: 1, // Cada linha com os 3 campos preenchidos representa 1 processo finalizado
           typeBreakdown: { [validOrigem]: 1 },
         });
 
-        parsedDetailedProcesses.push({
+        individualParsedDetailedProcesses.push({
           estagiarioId,
           date: isoDate,
           numeroProcesso: rawProc,
@@ -1310,154 +1437,143 @@ export default function App() {
           .toUpperCase();
       };
 
-      // 3.0 Detectar formato DETALHADO ("Controle detalhado")
-      // Identifica por subcolunas de tipo como CV, RCV, DCV, CR, RCR, DCR, REDCV, REDCR, REVCR
+      // 3.0 Detectar o formato DETALHADO em todos os blocos mensais.
+      // A aba pode repetir o cabeçalho de tipos quando começa outro mês.
       const DETAIL_TYPE_CODES = new Set(["CV", "RCV", "DCV", "CR", "RCR", "DCR", "REDCV", "REDCR", "REVCR"]);
-      let typesRowIdx = -1;
-      let maxTypeCodeCount = -1;
-      for (let i = 0; i < Math.min(15, rows.length); i++) {
-        const typeCodeCount = rows[i].filter(
-          (c) => DETAIL_TYPE_CODES.has(normalizeTypeCode(c || ""))
-        ).length;
-        if (typeCodeCount >= 3 && typeCodeCount > maxTypeCodeCount) {
-          maxTypeCodeCount = typeCodeCount;
-          typesRowIdx = i;
-        }
-      }
+      const detailedTypesRows = rows
+        .map((row, index) => ({
+          index,
+          count: row.filter((c) => DETAIL_TYPE_CODES.has(normalizeTypeCode(c || ""))).length,
+        }))
+        .filter(({ count }) => count >= 3)
+        .map(({ index }) => index);
 
-      if (typesRowIdx !== -1) {
-        // === FORMATO DETALHADO (subcolunas por tipo) ===
-        console.log(`[parseSheetData] Formato DETALHADO detectado na aba "${cName}", linha de tipos: ${typesRowIdx}`);
+      if (detailedTypesRows.length > 0) {
+        console.log(`[parseSheetData] Formato DETALHADO detectado na aba "${cName}" em ${detailedTypesRows.length} bloco(s).`);
         diagDetalhado = true;
-        diagTypesRowIdx = typesRowIdx;
+        diagTypesRowIdx = detailedTypesRows[0];
         diagTotalRows = rows.length;
 
-        // Linha de nomes: procura a linha de nomes subindo a partir de typesRowIdx
-        let namesRowIdx = typesRowIdx > 0 ? typesRowIdx - 1 : typesRowIdx;
-        for (let r = typesRowIdx - 1; r >= 0; r--) {
-          const row = rows[r];
-          const textCellCount = row.filter((c) => {
-            const trimmed = (c || "").trim();
-            return trimmed && !/^\d+(\.\d+)?%?$/.test(trimmed) && !DETAIL_TYPE_CODES.has(normalizeTypeCode(trimmed));
-          }).length;
-          if (textCellCount >= 3) {
-            namesRowIdx = r;
-            break;
-          }
-        }
+        detailedTypesRows.forEach((typesRowIdx, blockIdx) => {
+          const nextTypesRowIdx = detailedTypesRows[blockIdx + 1] ?? rows.length;
+          const typesRow = rows[typesRowIdx] || [];
 
-        const namesRow = rows[namesRowIdx];
-        const typesRow = rows[typesRowIdx];
-        const totalCols = Math.max(namesRow.length, typesRow.length);
-
-        // Forward-fill nomes de usuários (células mescladas: nome só na 1ª coluna, restante vazio)
-        let currentUserName = "";
-        const colUserMap: string[] = new Array(totalCols).fill("");
-        for (let c = 0; c < totalCols; c++) {
-          const cell = (namesRow[c] || "").trim();
-          // Atualiza nome corrente se a célula tem conteúdo e não é número puro (total) nem código de tipo
-          if (cell && !/^\d+(\.\d+)?%?$/.test(cell) && !DETAIL_TYPE_CODES.has(normalizeTypeCode(cell))) {
-            currentUserName = cell;
-          }
-          colUserMap[c] = currentUserName;
-        }
-
-        // Detectar a coluna de datas de forma robusta no formato detalhado
-        let dateColIdx = 0; // fallback padrão
-        let maxDateCount = 0;
-        const colCount = rows.reduce((max, r) => Math.max(max, r.length), 0);
-
-        // Varre as primeiras 6 colunas (A-F) para encontrar a coluna de datas
-        for (let c = 0; c < Math.min(6, colCount); c++) {
-          let dateCount = 0;
-          for (let r = typesRowIdx + 1; r < rows.length; r++) {
-            const row = rows[r];
-            if (c < row.length && row[c] && parseDateToISO(row[c])) {
-              dateCount++;
+          // A linha de nomes fica imediatamente antes das subcolunas de tipo,
+          // mas pode haver uma linha de totais entre ela e a linha de tipos.
+          let namesRowIdx = Math.max(0, typesRowIdx - 1);
+          for (let r = typesRowIdx - 1; r >= 0 && r >= typesRowIdx - 10; r--) {
+            const row = rows[r] || [];
+            const textCellCount = row.filter((c) => {
+              const trimmed = (c || "").trim();
+              return trimmed &&
+                !/^\d+(\.\d+)?%?$/.test(trimmed) &&
+                !DETAIL_TYPE_CODES.has(normalizeTypeCode(trimmed));
+            }).length;
+            if (textCellCount >= 3) {
+              namesRowIdx = r;
+              break;
             }
           }
-          if (dateCount > maxDateCount) {
-            maxDateCount = dateCount;
-            dateColIdx = c;
-          }
-        }
-        console.log(`[parseSheetData] Coluna de datas detectada no formato detalhado: coluna índice ${dateColIdx} (${maxDateCount} datas válidas)`);
 
-        // Mapear usuário -> lista de índices de colunas das subcolunas
-        const userColsMap: { [userId: string]: { name: string; cols: number[] } } = {};
-        console.log(`[DEBUG] Tipos detectados na aba "${cName}":`, typesRow.filter(c => {
-          const norm = normalizeTypeCode(c || "");
-          return norm && DETAIL_TYPE_CODES.has(norm);
-        }).join(", "));
-        console.log(`[DEBUG] Todos os cabeçalhos da linha de tipos:`, typesRow);
-        for (let c = 0; c < typesRow.length; c++) {
-          if (c === dateColIdx) continue; // Ignorar explicitamente a coluna de data para evitar parsing indevido
-          const typeCode = (typesRow[c] || "").trim();
-          const typeCodeNorm = normalizeTypeCode(typeCode);
-          const userName = colUserMap[c] || "";
-          // Só processa colunas que são códigos de tipo conhecidos E têm nome de usuário
-          if (!typeCode || !DETAIL_TYPE_CODES.has(typeCodeNorm)) continue;
-          if (!userName) continue;
+          const namesRow = rows[namesRowIdx] || [];
+          const totalCols = Math.max(namesRow.length, typesRow.length);
 
-          let userId = findEstagiarioIdLocal(userName);
-          if (!userId) {
-            const generatedId = userName
-              .toLowerCase()
-              .normalize("NFD")
-              .replace(/[\u0300-\u036f]/g, "")
-              .replace(/\s+/g, "_")
-              .replace(/[^a-z0-9_]/g, "");
-            if (!generatedId || generatedId.length < 2) continue;
-            if (!estagiariosCreatedTemp.includes(userName))
-              estagiariosCreatedTemp.push(userName);
-            userId = generatedId;
+          // Forward-fill nomes de usuários (células mescladas).
+          let currentUserName = "";
+          const colUserMap: string[] = new Array(totalCols).fill("");
+          for (let c = 0; c < totalCols; c++) {
+            const cell = (namesRow[c] || "").trim();
+            if (
+              cell &&
+              !/^\d+(\.\d+)?%?$/.test(cell) &&
+              !DETAIL_TYPE_CODES.has(normalizeTypeCode(cell))
+            ) {
+              currentUserName = isValidEstagiarioHeader(cell) ? cell : "";
+            }
+            colUserMap[c] = currentUserName;
           }
 
-          if (SKIP_IDS.has(userId)) continue;
+          // Detectar a coluna de datas somente dentro deste bloco mensal.
+          let dateColIdx = 0;
+          let maxDateCount = 0;
+          const colCount = Math.max(
+            0,
+            ...rows.slice(typesRowIdx + 1, nextTypesRowIdx).map((row) => row.length),
+          );
+          for (let c = 0; c < Math.min(6, colCount); c++) {
+            let dateCount = 0;
+            for (let r = typesRowIdx + 1; r < nextTypesRowIdx; r++) {
+              const row = rows[r] || [];
+              if (c < row.length && row[c] && parseDateToISO(row[c])) dateCount++;
+            }
+            if (dateCount > maxDateCount) {
+              maxDateCount = dateCount;
+              dateColIdx = c;
+            }
+          }
 
-          if (!userColsMap[userId]) userColsMap[userId] = { name: userName, cols: [] };
-          userColsMap[userId].cols.push(c);
-        }
+          const userColsMap: { [userId: string]: { name: string; cols: number[] } } = {};
+          for (let c = 0; c < typesRow.length; c++) {
+            if (c === dateColIdx) continue;
+            const typeCode = (typesRow[c] || "").trim();
+            const typeCodeNorm = normalizeTypeCode(typeCode);
+            const userName = colUserMap[c] || "";
+            if (
+              !typeCode ||
+              !DETAIL_TYPE_CODES.has(typeCodeNorm) ||
+              !isValidEstagiarioHeader(userName)
+            ) continue;
 
-        console.log(`[parseSheetData] Usuários detectados no formato detalhado:`, Object.keys(userColsMap));
-        diagDateColIdx = dateColIdx;
-        diagMaxDateCount = maxDateCount;
-        diagMappedUsers = Object.keys(userColsMap);
+            let userId = findEstagiarioIdLocal(userName);
+            if (!userId) {
+              const generatedId = userName
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/\s+/g, "_")
+                .replace(/[^a-z0-9_]/g, "");
+              if (!generatedId || generatedId.length < 2) continue;
+              if (!estagiariosCreatedTemp.includes(userName)) estagiariosCreatedTemp.push(userName);
+              userId = generatedId;
+            }
 
-        if (rows[typesRowIdx + 1]) {
-          diagFirstRowDump = rows[typesRowIdx + 1].slice(0, 10).join(" | ");
-          diagFirstDateRaw = rows[typesRowIdx + 1][dateColIdx] || "";
-          diagFirstDateIso = parseDateToISO(diagFirstDateRaw) || "null";
-        }
+            if (SKIP_IDS.has(userId)) continue;
+            if (!userColsMap[userId]) userColsMap[userId] = { name: userName, cols: [] };
+            userColsMap[userId].cols.push(c);
+          }
 
-        // Processar linhas de dados (a partir da linha após a de tipos)
-        for (let r = typesRowIdx + 1; r < rows.length; r++) {
-          const row = rows[r];
-          if (dateColIdx >= row.length) continue;
-          const rawDate = row[dateColIdx] || "";
-          const isoDate = parseDateToISO(rawDate);
-          if (!isoDate || isoDate < "2026-04-01") continue;
+          const mappedUserIds = Object.keys(userColsMap);
+          console.log(`[parseSheetData] Bloco ${blockIdx + 1}: usuários detectados:`, mappedUserIds);
+          if (blockIdx === 0) {
+            diagDateColIdx = dateColIdx;
+            diagMaxDateCount = maxDateCount;
+            diagMappedUsers = mappedUserIds;
+            if (rows[typesRowIdx + 1]) {
+              diagFirstRowDump = rows[typesRowIdx + 1].slice(0, 10).join(" | ");
+              diagFirstDateRaw = rows[typesRowIdx + 1][dateColIdx] || "";
+              diagFirstDateIso = parseDateToISO(diagFirstDateRaw) || "null";
+            }
+          } else {
+            diagMappedUsers = Array.from(new Set([...diagMappedUsers, ...mappedUserIds]));
+          }
 
-          Object.entries(userColsMap).forEach(([userId, { cols }]) => {
-            if (individualEstagiarioIds.has(userId)) return;
-            let total = 0;
-            const typeBreakdown: Record<string, number> = {};
+          for (let r = typesRowIdx + 1; r < nextTypesRowIdx; r++) {
+            const row = rows[r] || [];
+            if (dateColIdx >= row.length) continue;
+            const isoDate = parseDateToISO(row[dateColIdx] || "");
+            if (!isDateInSyncScope(isoDate)) continue;
 
-            cols.forEach((colIdx) => {
-              if (colIdx === dateColIdx) return; // Segurança extra
-              if (colIdx < row.length) {
+            Object.entries(userColsMap).forEach(([userId, { cols }]) => {
+              let total = 0;
+              const typeBreakdown: Record<string, number> = {};
+              cols.forEach((colIdx) => {
+                if (colIdx === dateColIdx || colIdx >= row.length) return;
                 const rawVal = (row[colIdx] || "").replace(/\s/g, "").replace(",", ".");
                 const num = Math.round(parseFloat(rawVal));
                 if (!isNaN(num) && num > 0) {
                   total += num;
-
-                  // Acumular por tipo (CV, RCV, DCV, CR, RCR, DCR, REDCV, REDCR, REVCR)
                   const typeCode = normalizeTypeCode(typesRow[colIdx] || "");
-                  if (typeCode) {
-                    typeBreakdown[typeCode] = (typeBreakdown[typeCode] || 0) + num;
-                  }
-
-                  // Gerar processos detalhados fictícios correspondentes (mantido para compatibilidade)
+                  if (typeCode) typeBreakdown[typeCode] = (typeBreakdown[typeCode] || 0) + num;
                   for (let i = 1; i <= num; i++) {
                     parsedDetailedProcesses.push({
                       estagiarioId: userId,
@@ -1467,19 +1583,12 @@ export default function App() {
                     });
                   }
                 }
-              }
-            });
-            if (total > 0) {
-              parsedEntries.push({
-                estagiarioId: userId,
-                date: isoDate,
-                count: total,
-                typeBreakdown,
               });
-            }
-          });
-        }
-        return; // Concluiu leitura desta aba no formato detalhado
+              if (total > 0) parsedEntries.push({ estagiarioId: userId, date: isoDate, count: total, typeBreakdown });
+            });
+          }
+        });
+        return; // Concluiu a leitura de todos os blocos detalhados desta aba.
       }
 
       // 3.1 Identificar coluna de datas (aquela com maior quantidade de entradas de datas válidas)
@@ -1559,12 +1668,11 @@ export default function App() {
             const row = rows[r];
             const rawDate = row[dateColIdx] || "";
             const isoDate = parseDateToISO(rawDate);
-            if (!isoDate || isoDate < "2026-04-01")
-              continue;
+            if (!isDateInSyncScope(isoDate)) continue;
 
             const estagiarioName = (row[estagiarioColIdx] || "").trim();
             const qtdStr = row[qtdColIdx];
-            if (!estagiarioName || estagiarioName === "" || !qtdStr) continue;
+            if (!isValidEstagiarioHeader(estagiarioName) || !qtdStr) continue;
 
             let estagiarioId = findEstagiarioIdLocal(estagiarioName);
             if (!estagiarioId) {
@@ -1618,7 +1726,7 @@ export default function App() {
             (e) => normalizeText(e.name) === normalizeText(trimmed),
           );
 
-          if (matchesExisting) {
+          if (matchesExisting && isValidEstagiarioHeader(trimmed)) {
             score += 15; // Pontuação altíssima para estagiários pré-existentes
           } else if (
             /^[A-Za-zÀ-ÖØ-öø-ÿ\s\.\-]{3,25}$/.test(trimmed) &&
@@ -1681,7 +1789,7 @@ export default function App() {
       nameRow.forEach((cell, cIdx) => {
         if (cIdx === dateColIdx) return;
         const estagiarioName = cell.trim();
-        if (!estagiarioName) return;
+        if (!isValidEstagiarioHeader(estagiarioName)) return;
 
         // Ignora palavras técnicas comuns para colunas (ex: "total", "observações", etc.)
         const normName = normalizeText(estagiarioName);
@@ -1750,8 +1858,7 @@ export default function App() {
         if (dateColIdx >= row.length) return;
         const rawDate = row[dateColIdx];
         const isoDate = parseDateToISO(rawDate);
-        if (!isoDate || isoDate < "2026-04-01")
-          return;
+        if (!isDateInSyncScope(isoDate)) return;
 
         mappedCols.forEach(({ colIndex, estagiarioId }) => {
           if (SKIP_IDS.has(estagiarioId) || individualEstagiarioIds.has(estagiarioId)) {
@@ -1777,10 +1884,34 @@ export default function App() {
       });
     });
 
+    // Quando a aba Controle Detalhado possui o mesmo estagiário e data da
+    // aba individual, o bloco detalhado é a fonte oficial e tem prioridade.
+    // Os dados individuais continuam sendo usados para datas que não existem
+    // no Controle Detalhado.
+    const detailedEntryKeys = new Set(
+      parsedEntries.map((entry) => `${entry.estagiarioId}_${entry.date}`),
+    );
+    const entriesToConsolidate = [
+      ...parsedEntries,
+      ...individualParsedEntries.filter(
+        (entry) => !detailedEntryKeys.has(`${entry.estagiarioId}_${entry.date}`),
+      ),
+    ];
+
+    const detailedProcessKeys = new Set(
+      parsedDetailedProcesses.map((process) => `${process.estagiarioId}_${process.date}`),
+    );
+    const detailedProcessesToKeep = [
+      ...parsedDetailedProcesses,
+      ...individualParsedDetailedProcesses.filter(
+        (process) => !detailedProcessKeys.has(`${process.estagiarioId}_${process.date}`),
+      ),
+    ];
+
     // ELIMINATE DUPLICATES AND REDUNDANCIES:
     const consolidatedMap: { [key: string]: Omit<ProductivityEntry, "id"> } =
       {};
-    parsedEntries.forEach((entry) => {
+    entriesToConsolidate.forEach((entry) => {
       const key = `${entry.estagiarioId}_${entry.date}`;
       if (consolidatedMap[key]) {
         consolidatedMap[key].count += entry.count;
@@ -1807,6 +1938,7 @@ export default function App() {
 
     // Ensure estagiariosCreatedTemp has detailed representations in estagiariosFromSheet
     estagiariosCreatedTemp.forEach((name) => {
+      if (!isValidEstagiarioHeader(name)) return;
       const code = name
         .toLowerCase()
         .normalize("NFD")
@@ -1852,10 +1984,85 @@ export default function App() {
       entries: consolidatedEntries,
       estagiariosCreated: uniqueEstagiariosCreated,
       estagiariosDetailedToCreate: estagiariosFromSheet,
-      detailedProcesses: parsedDetailedProcesses,
+      detailedProcesses: detailedProcessesToKeep,
       message: msg,
       debugRows: debugRows,
     };
+  };
+
+  const getSheetSyncScope = async (sheetUrl: string) => {
+    const currentMonth = getCurrentMonth();
+
+    try {
+      const stateSnap = await getDoc(doc(db, "settings", "sheetSyncState"));
+      const state = stateSnap.exists() ? stateSnap.data() || {} : {};
+      const normalizedUrl = sheetUrl.trim();
+      const shouldArchiveHistory =
+        !stateSnap.exists() ||
+        state.sheetUrl !== normalizedUrl ||
+        state.archivedMonth !== currentMonth;
+
+      let targetMonths: string[] | undefined;
+      if (!stateSnap.exists() || state.sheetUrl !== normalizedUrl) {
+        // Primeiro fechamento para esta planilha: recupera também os meses
+        // anteriores que ainda não chegaram ao banco.
+        targetMonths = undefined;
+      } else {
+        const [currentYear, currentMonthNumber] = currentMonth.split("-").map(Number);
+        const [archivedYear, archivedMonthNumber] = String(state.archivedMonth || "")
+          .split("-")
+          .map(Number);
+        const currentIndex = currentYear * 12 + currentMonthNumber - 1;
+        const archivedIndex = archivedYear * 12 + archivedMonthNumber - 1;
+
+        if (!Number.isFinite(archivedIndex) || archivedIndex < 0) {
+          targetMonths = undefined;
+        } else if (archivedIndex >= currentIndex) {
+          targetMonths = [currentMonth];
+        } else {
+          targetMonths = [];
+          for (let monthIndex = archivedIndex + 1; monthIndex <= currentIndex; monthIndex++) {
+            const year = Math.floor(monthIndex / 12);
+            const month = (monthIndex % 12) + 1;
+            targetMonths.push(`${year}-${String(month).padStart(2, "0")}`);
+          }
+        }
+      }
+
+      return {
+        currentMonth,
+        shouldArchiveHistory,
+        // Primeira sincronização e virada do mês fazem o fechamento histórico.
+        // Nos demais ciclos, o parser recebe somente o mês corrente.
+        targetMonths,
+      };
+    } catch (error) {
+      // Se o marcador ainda não puder ser lido, preserva a segurança arquivando
+      // o histórico uma vez. O marcador só é gravado depois de um sync válido.
+      console.warn("Não foi possível ler o estado mensal da sincronização:", error);
+      return {
+        currentMonth,
+        shouldArchiveHistory: true,
+        targetMonths: undefined,
+      };
+    }
+  };
+
+  const markSheetMonthArchived = async (
+    sheetUrl: string,
+    currentMonth: string,
+    mode: "history" | "current",
+  ) => {
+    await setDoc(
+      doc(db, "settings", "sheetSyncState"),
+      {
+        sheetUrl: sheetUrl.trim(),
+        archivedMonth: currentMonth,
+        lastMode: mode,
+        archivedAt: new Date().toISOString(),
+      },
+      { merge: true },
+    );
   };
 
   // Trigger Sheet Sync
@@ -1879,6 +2086,11 @@ export default function App() {
       return;
     }
 
+    if (syncInFlightRef.current) {
+      return;
+    }
+    syncInFlightRef.current = true;
+
     let timerId: any = null;
     setSyncingSheets(true);
     setSyncDuration(0);
@@ -1894,12 +2106,14 @@ export default function App() {
 
     try {
       const activeToken = (await getAccessToken()) || googleToken || null;
+      const syncScope = await getSheetSyncScope(urlStr);
 
       const resData = await fetchSheetDataDirectly(urlStr, activeToken);
       const parseResult = parseSheetData(
         resData.sheets || resData.csvText,
         activeEstagiarios,
         selectedSheetName,
+        syncScope.targetMonths,
       );
 
       if (showFeedback) {
@@ -1911,6 +2125,8 @@ export default function App() {
               showFeedback,
               sheetsNames: Object.keys(resData.sheets || {}),
               message: parseResult.message,
+              syncMode: syncScope.shouldArchiveHistory ? "history" : "current",
+              syncMonth: syncScope.currentMonth,
               entriesCount: parseResult.entries?.length || 0,
               entries: (parseResult.entries || []).map(e => ({ estagiarioId: e.estagiarioId, date: e.date, count: e.count })),
               detailedProcessesCount: parseResult.detailedProcesses?.length || 0,
@@ -1939,18 +2155,11 @@ export default function App() {
       setSheetsMessage(parseResult.message);
       setSheetSyncError("");
 
-      // Salva no Supabase — sincronização manual salva tudo, automática salva só o dia atual
-      let finalEntriesToSave = parseResult.entries;
-      let finalDetailedProcesses = parseResult.detailedProcesses || [];
-      if (!showFeedback) {
-        const todayStr = getCurrentDate();
-        finalEntriesToSave = parseResult.entries.filter(
-          (e) => e.date === todayStr
-        );
-        finalDetailedProcesses = (parseResult.detailedProcesses || []).filter(
-          (p) => p.date === todayStr
-        );
-      }
+      // Salva no Supabase. O upsert diferencial evita escritas desnecessárias.
+      // O salvamento e diferencial; aplique todas as alteracoes encontradas,
+      // inclusive quando a dashboard estiver exibindo outro dia ou mes.
+      const finalEntriesToSave = parseResult.entries;
+      const finalDetailedProcesses = parseResult.detailedProcesses || [];
 
       await saveSyncedDataToFirestore(
         finalEntriesToSave,
@@ -1959,6 +2168,11 @@ export default function App() {
         !showFeedback,
         parseResult.estagiariosDetailedToCreate || [],
         finalDetailedProcesses,
+      );
+      await markSheetMonthArchived(
+        urlStr,
+        syncScope.currentMonth,
+        syncScope.shouldArchiveHistory ? "history" : "current",
       );
 
       const endTime = Date.now();
@@ -2008,6 +2222,7 @@ export default function App() {
       }
     } finally {
       if (timerId) clearInterval(timerId);
+      syncInFlightRef.current = false;
       setSyncingSheets(false);
     }
   };
@@ -2101,11 +2316,13 @@ export default function App() {
         throw new Error("Token de acesso não disponível. Faça login novamente.");
       }
 
+      const syncScope = await getSheetSyncScope(spreadsheetUrl.trim());
       const resData = await fetchSheetDataDirectly(spreadsheetUrl.trim(), activeToken);
       const parseResult = parseSheetData(
         resData.sheets || resData.csvText,
         estagiarios,
         selectedSheetName,
+        syncScope.targetMonths,
       );
 
       if (!parseResult.success) {
@@ -2128,6 +2345,11 @@ export default function App() {
         true, // isStartupSilent = true
         parseResult.estagiariosDetailedToCreate || [],
         parseResult.detailedProcesses || [],
+      );
+      await markSheetMonthArchived(
+        spreadsheetUrl.trim(),
+        syncScope.currentMonth,
+        syncScope.shouldArchiveHistory ? "history" : "current",
       );
 
       const endTime = Date.now();
@@ -2313,6 +2535,16 @@ export default function App() {
         }
       }
 
+      // Sofia pode existir apenas como fallback visual enquanto os dados ainda
+      // não foram importados. Ao localizar lançamentos dela, persiste também
+      // o cadastro para que banco e dashboard permaneçam consistentes.
+      if (
+        entriesToSave.some((entry) => entry.estagiarioId === SOFIA_FALLBACK.id) &&
+        !estagiariosToUpsert.some((estagiario) => estagiario.id === SOFIA_FALLBACK.id)
+      ) {
+        estagiariosToUpsert.push(SOFIA_FALLBACK);
+      }
+
       // Otimização: Filtrar apenas os estagiários que sofreram alguma modificação cadastral ou novos cadastros
       const finalEstagiariosToUpsert = estagiariosToUpsert
         .map((newEstag) => {
@@ -2331,6 +2563,12 @@ export default function App() {
         .filter((newEstag) => {
           const existing = estagiariosRef.current.find((e) => e.id === newEstag.id);
           if (!existing) return true; // Novo cadastro
+          if (
+            newEstag.id === SOFIA_FALLBACK.id &&
+            entriesToSave.some((entry) => entry.estagiarioId === SOFIA_FALLBACK.id)
+          ) {
+            return true; // Sofia pode estar apenas no fallback local, não no banco.
+          }
           return (
             existing.name !== newEstag.name ||
             existing.role !== newEstag.role ||
@@ -2381,7 +2619,9 @@ export default function App() {
       // Atualiza o estado local 'entries' imediatamente para refletir na dashboard sem delay e sem F5
       if (validEntries.length > 0) {
         setEntries((prev) => {
-          const map = new Map(prev.map((e) => [`${e.estagiarioId}_${e.date}`, e]));
+          const map = new Map<string, ProductivityEntry>(
+            prev.map((e): [string, ProductivityEntry] => [`${e.estagiarioId}_${e.date}`, e]),
+          );
           validEntries.forEach((newEntry) => {
             const key = `${newEntry.estagiarioId}_${newEntry.date}`;
             const existing = map.get(key);
@@ -2452,8 +2692,8 @@ export default function App() {
 
       // 5. Recarrega os dados completos diretamente do Supabase e atualiza o estado local
       // Isso garante que o dashboard, gráficos e tabelas atualizem instantaneamente sem precisar de F5
-      await fetchData(true);
-      await fetchAllDetailedProcesses();
+      // O estado local ja foi atualizado acima. Uma leitura logo apos o upsert
+      // pode ainda estar defasada e sobrescrever a dashboard com dados antigos.
 
       if (!isStartupSilent) {
         setIsSheetsModalOpen(false);
@@ -2467,6 +2707,7 @@ export default function App() {
       if (!isStartupSilent) {
         showToast("Erro ao gravar novos dados sincronizados no Supabase.", "error");
       }
+      throw err;
     } finally {
       setIsSaving(false);
     }
@@ -2616,6 +2857,8 @@ export default function App() {
         setSemanaProvaIds(value?.estagiariosIds || []);
       } else if (key === "ferias") {
         setFeriasIds(value?.estagiariosIds || []);
+      } else if (key === "statusPeriods") {
+        setStatusPeriods(Array.isArray(value?.periods) ? value.periods : []);
       } else if (key === "googleSheet") {
         setSpreadsheetUrl(value?.url || DEFAULT_SHEET_URL);
         setAutoSyncEnabled(value?.autoSync !== undefined ? value.autoSync : true);
@@ -2972,6 +3215,9 @@ export default function App() {
       // 3. Atualizar o estado local
       setEstagiarios((prev) => prev.filter((a) => a.id !== estagiarioId));
       setEntries((prev) => prev.filter((item) => item.estagiarioId !== estagiarioId));
+      const remainingPeriods = statusPeriods.filter((period) => period.estagiarioId !== estagiarioId);
+      setStatusPeriods(remainingPeriods);
+      await setDoc(doc(db, "settings", "statusPeriods"), { periods: remainingPeriods });
 
       // Fechar modal de detalhe
       setSelectedEstagiarioDetail(null);
@@ -2985,78 +3231,127 @@ export default function App() {
   };
 
   // Toggle Semana de Provas / Meio Período
-  const handleToggleSemanaProva = async (estagiarioId: string) => {
-    const isCurrentlyActive = semanaProvaIds.includes(estagiarioId);
-    let updatedIds: string[];
-    if (isCurrentlyActive) {
-      updatedIds = semanaProvaIds.filter((id) => id !== estagiarioId);
-    } else {
-      updatedIds = [...semanaProvaIds, estagiarioId];
-    }
+  const persistStatusPeriodState = async (
+    type: StatusPeriodType,
+    updatedIds: string[],
+    updatedPeriods: StatusPeriod[],
+  ) => {
+    await Promise.all([
+      setDoc(doc(db, "settings", type === "ferias" ? "ferias" : "semanaProva"), {
+        estagiariosIds: updatedIds,
+      }),
+      setDoc(doc(db, "settings", "statusPeriods"), {
+        periods: updatedPeriods,
+      }),
+    ]);
+  };
+
+  const openStatusPeriodDialog = (estagiarioId: string, type: StatusPeriodType) => {
+    const today = getCurrentDate();
+    setPeriodDialog({ estagiarioId, type });
+    setPeriodStartDate(today);
+    setPeriodEndDate(getMonthBounds(today.substring(0, 7)).end);
+  };
+
+  const finishStatusPeriod = async (estagiarioId: string, type: StatusPeriodType) => {
+    const today = getCurrentDate();
+    const activePeriod = statusPeriods
+      .filter(
+        (period) =>
+          period.estagiarioId === estagiarioId &&
+          period.type === type &&
+          period.startDate <= today &&
+          (!period.endDate || period.endDate >= today),
+      )
+      .sort((a, b) => b.startDate.localeCompare(a.startDate))[0];
+    const updatedPeriods = activePeriod
+      ? statusPeriods.map((period) =>
+          period.id === activePeriod.id ? { ...period, endDate: today } : period,
+        )
+      : statusPeriods;
+    const currentIds = type === "ferias" ? feriasIds : semanaProvaIds;
+    const updatedIds = currentIds.filter((id) => id !== estagiarioId);
 
     try {
-      // Atualiza o estado local para uma resposta imediata na UI
-      setSemanaProvaIds(updatedIds);
-
-      // Persiste na tabela settings do Supabase
-      await setDoc(doc(db, "settings", "semanaProva"), {
-        estagiariosIds: updatedIds,
-      });
-
+      if (type === "ferias") setFeriasIds(updatedIds);
+      else setSemanaProvaIds(updatedIds);
+      setStatusPeriods(updatedPeriods);
+      await persistStatusPeriodState(type, updatedIds, updatedPeriods);
       const estagiarioName = estagiarios.find((e) => e.id === estagiarioId)?.name || "Estagiário";
-      if (!isCurrentlyActive) {
-        showToast(
-          `"${estagiarioName}" definido em Semana de Provas! Meta ajustada pela metade.`,
-          "success"
-        );
-      } else {
-        showToast(
-          `Semana de Provas finalizada para "${estagiarioName}"! Meta restaurada ao normal.`,
-          "success"
-        );
-      }
+      showToast(
+        `${type === "ferias" ? "Férias" : "Semana de Provas"} finalizada para "${estagiarioName}".`,
+        "success",
+      );
     } catch (err: any) {
-      console.error("Erro ao atualizar semana de prova:", err);
-      // Reverte o estado local em caso de erro
-      setSemanaProvaIds(semanaProvaIds);
-      alert("Erro ao salvar alteração da semana de prova.");
+      console.error("Erro ao finalizar período do estagiário:", err);
+      if (type === "ferias") setFeriasIds(currentIds);
+      else setSemanaProvaIds(currentIds);
+      setStatusPeriods(statusPeriods);
+      alert("Erro ao salvar o período do estagiário.");
     }
+  };
+
+  const handleToggleStatusPeriod = (estagiarioId: string, type: StatusPeriodType) => {
+    const currentIds = type === "ferias" ? feriasIds : semanaProvaIds;
+    if (currentIds.includes(estagiarioId)) {
+      void finishStatusPeriod(estagiarioId, type);
+    } else {
+      openStatusPeriodDialog(estagiarioId, type);
+    }
+  };
+
+  const handleConfirmStatusPeriod = async () => {
+    if (!periodDialog) return;
+    if (!periodStartDate || !periodEndDate || periodStartDate > periodEndDate) {
+      alert("Informe um intervalo válido para o período.");
+      return;
+    }
+
+    const { estagiarioId, type } = periodDialog;
+    const today = getCurrentDate();
+    const newPeriod: StatusPeriod = {
+      id: `${estagiarioId}_${type}_${Date.now()}`,
+      estagiarioId,
+      type,
+      startDate: periodStartDate,
+      endDate: periodEndDate,
+    };
+    const updatedPeriods = [...statusPeriods, newPeriod];
+    const currentIds = type === "ferias" ? feriasIds : semanaProvaIds;
+    const appliesToday = periodStartDate <= today && periodEndDate >= today;
+    const updatedIds = appliesToday
+      ? Array.from(new Set([...currentIds, estagiarioId]))
+      : currentIds.filter((id) => id !== estagiarioId);
+
+    try {
+      if (type === "ferias") setFeriasIds(updatedIds);
+      else setSemanaProvaIds(updatedIds);
+      setStatusPeriods(updatedPeriods);
+      await persistStatusPeriodState(type, updatedIds, updatedPeriods);
+      setPeriodDialog(null);
+      const estagiarioName = estagiarios.find((e) => e.id === estagiarioId)?.name || "Estagiário";
+      showToast(
+        `${type === "ferias" ? "Férias" : "Semana de Provas"} registrada para "${estagiarioName}" (${formatDatePt(periodStartDate)} a ${formatDatePt(periodEndDate)}).`,
+        "success",
+      );
+    } catch (err: any) {
+      console.error("Erro ao registrar período do estagiário:", err);
+      if (type === "ferias") setFeriasIds(currentIds);
+      else setSemanaProvaIds(currentIds);
+      setStatusPeriods(statusPeriods);
+      alert("Erro ao salvar o período do estagiário.");
+    }
+  };
+
+  const handleToggleSemanaProva = async (estagiarioId: string) => {
+    handleToggleStatusPeriod(estagiarioId, "semanaProva");
+    return;
   };
 
   // Toggle Férias
   const handleToggleFerias = async (estagiarioId: string) => {
-    const isCurrentlyActive = feriasIds.includes(estagiarioId);
-    let updatedIds: string[];
-    if (isCurrentlyActive) {
-      updatedIds = feriasIds.filter((id) => id !== estagiarioId);
-    } else {
-      updatedIds = [...feriasIds, estagiarioId];
-    }
-
-    try {
-      setFeriasIds(updatedIds);
-
-      await setDoc(doc(db, "settings", "ferias"), {
-        estagiariosIds: updatedIds,
-      });
-
-      const estagiarioName = estagiarios.find((e) => e.id === estagiarioId)?.name || "Estagiário";
-      if (!isCurrentlyActive) {
-        showToast(
-          `"${estagiarioName}" definido em Férias! Isento de metas diárias.`,
-          "success"
-        );
-      } else {
-        showToast(
-          `Férias finalizadas para "${estagiarioName}"! Meta restaurada ao normal.`,
-          "success"
-        );
-      }
-    } catch (err: any) {
-      console.error("Erro ao atualizar férias:", err);
-      setFeriasIds(feriasIds);
-      alert("Erro ao salvar alteração de férias.");
-    }
+    handleToggleStatusPeriod(estagiarioId, "ferias");
+    return;
   };
 
   // Função para redistribuir processos de um estagiário para outro
@@ -3288,8 +3583,51 @@ export default function App() {
         estagiario.role === "pos_graduacao" ? "pos_graduacao" : "graduacao";
       const baseGoal =
         estagiario.dailyGoal ?? (role === "pos_graduacao" ? 30 : 25);
-      const isSemanaProva = semanaProvaIds.includes(estagiario.id);
-      const isFerias = feriasIds.includes(estagiario.id);
+      const monthBounds = getMonthBounds(selectedMonth);
+      const estagiarioStatusPeriods = statusPeriods.filter(
+        (period) =>
+          period.estagiarioId === estagiario.id &&
+          period.startDate <= monthBounds.end &&
+          (!period.endDate || period.endDate >= monthBounds.start),
+      );
+      const isCurrentMonth = selectedMonth === getCurrentMonth();
+      const displayStatusPeriods = [...estagiarioStatusPeriods];
+      if (
+        isCurrentMonth &&
+        semanaProvaIds.includes(estagiario.id) &&
+        !statusPeriods.some(
+          (period) => period.estagiarioId === estagiario.id && period.type === "semanaProva",
+        )
+      ) {
+        displayStatusPeriods.push({
+          id: `legacy_semana_${estagiario.id}_${selectedMonth}`,
+          estagiarioId: estagiario.id,
+          type: "semanaProva",
+          startDate: monthBounds.start,
+          endDate: monthBounds.end,
+        });
+      }
+      if (
+        isCurrentMonth &&
+        feriasIds.includes(estagiario.id) &&
+        !statusPeriods.some(
+          (period) => period.estagiarioId === estagiario.id && period.type === "ferias",
+        )
+      ) {
+        displayStatusPeriods.push({
+          id: `legacy_ferias_${estagiario.id}_${selectedMonth}`,
+          estagiarioId: estagiario.id,
+          type: "ferias",
+          startDate: monthBounds.start,
+          endDate: monthBounds.end,
+        });
+      }
+      const isSemanaProva =
+        displayStatusPeriods.some((period) => period.type === "semanaProva") ||
+        (isCurrentMonth && semanaProvaIds.includes(estagiario.id));
+      const isFerias =
+        displayStatusPeriods.some((period) => period.type === "ferias") ||
+        (isCurrentMonth && feriasIds.includes(estagiario.id));
       const dailyGoal = isFerias ? 0 : (isSemanaProva ? Math.round(baseGoal / 2) : baseGoal);
       const daysMeetingGoal = filteredEntries.filter(
         (item) => item.count >= dailyGoal,
@@ -3326,11 +3664,12 @@ export default function App() {
         averagePerDay,
         status,
         entriesList: filteredEntries,
+        statusPeriods: displayStatusPeriods,
         semanaProva: isSemanaProva,
         ferias: isFerias,
       };
     });
-  }, [estagiarios, normalizedEntries, selectedMonth, selectedDetailDate, semanaProvaIds, feriasIds]);
+  }, [estagiarios, normalizedEntries, selectedMonth, selectedDetailDate, semanaProvaIds, feriasIds, statusPeriods]);
 
   // Total de processos do dia selecionado
   const totalDayAnalyzed = useMemo(() => {
@@ -3840,14 +4179,11 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => {
-              setGoogleUser({ email: "tjpr@tjpr.jus.br", displayName: "Assessoria TJPR" });
-              setHasSpreadsheetAccess(true);
-            }}
+            onClick={handleGoogleLogin}
             className="w-full mt-3 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl font-semibold text-xs tracking-wider transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer border border-white/15"
           >
             <svg className="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" /></svg>
-            <span>ACESSAR DASHBOARD DIRETAMENTE</span>
+            <span>ENTRAR COM O GOOGLE</span>
           </button>
 
           <div className="mt-10 pt-6 border-t border-white/5 w-full">
@@ -3874,12 +4210,6 @@ export default function App() {
             Aguarde enquanto verificamos se a conta <span className="text-indigo-300 font-bold">{googleUser.email}</span> possui acesso à planilha vinculada do Google Sheets...
           </p>
           <div className="flex gap-2 justify-center w-full">
-            <button
-              onClick={() => setHasSpreadsheetAccess(true)}
-              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-md"
-            >
-              Abrir Dashboard Agora
-            </button>
             <button
               onClick={handleGoogleLogout}
               className="px-4 py-2 border border-white/10 text-white/60 hover:text-white rounded-lg text-xs font-bold hover:bg-white/5 transition-all cursor-pointer"
@@ -5874,7 +6204,7 @@ export default function App() {
                                   Em Férias
                                 </span>
                               )}
-                              {detailedEstagiario.semanaProva && !detailedEstagiario.ferias && (
+                              {detailedEstagiario.semanaProva && (
                                 <span className="px-1.5 py-0.5 bg-violet-950 text-violet-200 border border-violet-800 rounded text-[9px] font-mono flex items-center gap-0.5 animate-pulse">
                                   <GraduationCap className="w-2.5 h-2.5 text-violet-400" />
                                   Semana de Prova
@@ -5972,6 +6302,60 @@ export default function App() {
                               Histórico de Lançamentos
                             </h5>
 
+                            {(() => {
+                              const monthBounds = getMonthBounds(selectedMonth);
+                              const monthPeriods = detailedEstagiario.statusPeriods.filter(
+                                (period) =>
+                                  period.startDate <= monthBounds.end &&
+                                  (!period.endDate || period.endDate >= monthBounds.start),
+                              );
+                              const vacationPeriods = monthPeriods.filter((period) => period.type === "ferias");
+                              const examPeriods = monthPeriods.filter((period) => period.type === "semanaProva");
+                              const vacationBusinessDays = vacationPeriods.reduce((total, period) => {
+                                const start = period.startDate > monthBounds.start ? period.startDate : monthBounds.start;
+                                const endDate = period.endDate || getCurrentDate();
+                                const end = endDate < monthBounds.end ? endDate : monthBounds.end;
+                                return total + countBusinessDaysInclusive(start, end);
+                              }, 0);
+
+                              if (monthPeriods.length === 0) return null;
+                              return (
+                                <div className="space-y-2 mb-3">
+                                  {vacationPeriods.length > 0 && (
+                                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] text-amber-900">
+                                      <div className="flex items-center gap-1.5 font-black uppercase tracking-wide">
+                                        <Palmtree className="w-3.5 h-3.5 text-amber-600" />
+                                        Férias registradas
+                                      </div>
+                                      <div className="mt-1 font-semibold">
+                                        {vacationPeriods.map((period) => (
+                                          <span key={period.id} className="mr-2 inline-block">
+                                            {formatDatePt(period.startDate)} a {formatDatePt(period.endDate || getCurrentDate())}
+                                          </span>
+                                        ))}
+                                        <span className="font-black">· {vacationBusinessDays} dias úteis de ausência</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {examPeriods.length > 0 && (
+                                    <div className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-[10px] text-violet-900">
+                                      <div className="flex items-center gap-1.5 font-black uppercase tracking-wide">
+                                        <GraduationCap className="w-3.5 h-3.5 text-violet-600" />
+                                        Semana de provas registrada
+                                      </div>
+                                      <div className="mt-1 font-semibold">
+                                        {examPeriods.map((period) => (
+                                          <span key={period.id} className="mr-2 inline-block">
+                                            {formatDatePt(period.startDate)} a {formatDatePt(period.endDate || getCurrentDate())}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
+
                             {detailedEstagiario.entriesList.length === 0 ? (
                               <div className="p-8 text-center text-slate-400">
                                 <Clock className="w-8 h-8 text-slate-300 mx-auto mb-2" />
@@ -5979,7 +6363,16 @@ export default function App() {
                               </div>
                             ) : (
                               <div className="divide-y divide-slate-100 border border-slate-100 rounded-lg overflow-hidden shadow-sm">
-                                {detailedEstagiario.entriesList.map((entry) => (
+                                {detailedEstagiario.entriesList.map((entry) => {
+                                  const entryStatusPeriods = detailedEstagiario.statusPeriods.filter(
+                                    (period) =>
+                                      period.startDate <= entry.date &&
+                                      (!period.endDate || period.endDate >= entry.date),
+                                  );
+                                  const vacationPeriod = entryStatusPeriods.find((period) => period.type === "ferias");
+                                  const examPeriod = entryStatusPeriods.find((period) => period.type === "semanaProva");
+
+                                  return (
                                   <div
                                     key={entry.id}
                                     className="p-3 bg-white hover:bg-slate-50 flex justify-between items-center transition-colors"
@@ -5999,10 +6392,26 @@ export default function App() {
                                         </span>
                                       </div>
                                     </div>
-                                    <div className="flex items-center gap-3">
+                                    <div className="flex items-center gap-2.5">
                                       <span className="font-mono text-xs font-bold text-slate-900 bg-slate-100 px-2 py-1 rounded">
                                         {entry.count} concluídos
                                       </span>
+                                      {vacationPeriod && (
+                                        <span
+                                          title={`Férias: ${formatDatePt(vacationPeriod.startDate)} a ${formatDatePt(vacationPeriod.endDate || getCurrentDate())}`}
+                                          className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-1 text-[8px] font-black text-amber-800"
+                                        >
+                                          <Palmtree className="w-2.5 h-2.5" /> Férias
+                                        </span>
+                                      )}
+                                      {examPeriod && (
+                                        <span
+                                          title={`Semana de provas: ${formatDatePt(examPeriod.startDate)} a ${formatDatePt(examPeriod.endDate || getCurrentDate())}`}
+                                          className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-1.5 py-1 text-[8px] font-black text-violet-800"
+                                        >
+                                          <GraduationCap className="w-2.5 h-2.5" /> Prova
+                                        </span>
+                                      )}
                                       <div className="flex items-center gap-1">
                                         <button
                                           onClick={() => {
@@ -6027,7 +6436,8 @@ export default function App() {
                                       </div>
                                     </div>
                                   </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             )}
                           </>
@@ -6036,6 +6446,29 @@ export default function App() {
                             <h5 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3">
                               Linha do Tempo dos Processos
                             </h5>
+
+                            {(() => {
+                              const dayStatusPeriods = detailedEstagiario.statusPeriods.filter(
+                                (period) =>
+                                  period.startDate <= selectedDetailDate &&
+                                  (!period.endDate || period.endDate >= selectedDetailDate),
+                              );
+                              if (dayStatusPeriods.length === 0) return null;
+                              return (
+                                <div className="mb-3 flex flex-wrap gap-2">
+                                  {dayStatusPeriods.some((period) => period.type === "ferias") && (
+                                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-[9px] font-black text-amber-800">
+                                      <Palmtree className="w-3 h-3" /> Férias
+                                    </span>
+                                  )}
+                                  {dayStatusPeriods.some((period) => period.type === "semanaProva") && (
+                                    <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-[9px] font-black text-violet-800">
+                                      <GraduationCap className="w-3 h-3" /> Semana de provas
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })()}
 
                             {loadingProcesses ? (
                               <div className="p-8 text-center text-slate-400 font-bold text-xs animate-pulse">
@@ -6940,6 +7373,79 @@ export default function App() {
                 </div>
               </motion.div>
             </div>
+          )}
+        </AnimatePresence>
+
+        {/* Registro de período de férias ou semana de provas */}
+        <AnimatePresence>
+          {periodDialog && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/50 p-4"
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.96, y: 8 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.96, y: 8 }}
+                className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl"
+              >
+                <div className="flex items-start gap-3">
+                  <div className={`rounded-xl p-2 ${periodDialog.type === "ferias" ? "bg-amber-100 text-amber-700" : "bg-violet-100 text-violet-700"}`}>
+                    {periodDialog.type === "ferias" ? <Palmtree className="w-5 h-5" /> : <GraduationCap className="w-5 h-5" />}
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-slate-800">
+                      Registrar {periodDialog.type === "ferias" ? "férias" : "semana de provas"}
+                    </h3>
+                    <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                      {estagiarios.find((estagiario) => estagiario.id === periodDialog.estagiarioId)?.name}
+                      {" — informe o período exato. Se atravessar a virada do mês, ele aparecerá nos dois meses."}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                    Início
+                    <input
+                      type="date"
+                      value={periodStartDate}
+                      onChange={(event) => setPeriodStartDate(event.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs font-mono text-slate-800 outline-none focus:border-indigo-400"
+                    />
+                  </label>
+                  <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                    Término
+                    <input
+                      type="date"
+                      value={periodEndDate}
+                      min={periodStartDate}
+                      onChange={(event) => setPeriodEndDate(event.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs font-mono text-slate-800 outline-none focus:border-indigo-400"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-4 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPeriodDialog(null)}
+                    className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmStatusPeriod}
+                    className="flex-1 rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white hover:bg-slate-800"
+                  >
+                    Registrar período
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
           )}
         </AnimatePresence>
 
