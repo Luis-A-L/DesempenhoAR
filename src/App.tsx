@@ -2919,8 +2919,6 @@ export default function App() {
     ) {
       // Planilhas privadas precisam do token OAuth. Aguarda o login para evitar
       // uma tentativa pÃºblica que sempre termina em HTTP 400.
-      const isPublishedUrl = spreadsheetUrl.includes("/d/e/");
-      if (!googleToken && !isPublishedUrl) return;
       setHasAutoSyncedOnStartup(true);
       triggerSheetsSync(spreadsheetUrl, estagiariosRef.current, false);
     }

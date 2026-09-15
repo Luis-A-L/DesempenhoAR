@@ -2,6 +2,125 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import fs from "fs";
+import { createSign } from "node:crypto";
+import "dotenv/config";
+
+const DEFAULT_SERVICE_ACCOUNT_EMAIL =
+  "sync-planilhas-produtividade@produtividade-p-sep-ar.iam.gserviceaccount.com";
+const GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token";
+const GOOGLE_SHEETS_SCOPES = [
+  "https://www.googleapis.com/auth/spreadsheets.readonly",
+  "https://www.googleapis.com/auth/drive.readonly",
+].join(" ");
+
+type ServiceAccountCredentials = {
+  client_email: string;
+  private_key: string;
+};
+
+let serviceAccountTokenCache: { accessToken: string; expiresAt: number } | null = null;
+
+const base64UrlEncode = (value: string | Buffer) =>
+  Buffer.from(value)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+
+const getServiceAccountCredentials = (): ServiceAccountCredentials | null => {
+  const jsonValue = process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim();
+  const base64Value = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64?.trim();
+  const jsonFilePath = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_FILE?.trim();
+  const email =
+    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL?.trim() || DEFAULT_SERVICE_ACCOUNT_EMAIL;
+  const privateKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.replace(/\\n/g, "\n");
+
+  if (jsonValue || base64Value || jsonFilePath) {
+    try {
+      const decoded = jsonFilePath
+        ? fs.readFileSync(jsonFilePath, "utf8")
+        : base64Value
+          ? Buffer.from(base64Value, "base64").toString("utf8")
+          : jsonValue;
+      const parsed = JSON.parse(decoded || "{}");
+      if (parsed.client_email && parsed.private_key) {
+        return {
+          client_email: parsed.client_email,
+          private_key: parsed.private_key,
+        };
+      }
+      throw new Error("O JSON da conta de serviço não contém client_email e private_key.");
+    } catch (error: any) {
+      throw new Error(`Credencial da conta de serviço inválida: ${error.message}`);
+    }
+  }
+
+  if (privateKey) {
+    return { client_email: email, private_key: privateKey };
+  }
+
+  return null;
+};
+
+const hasServiceAccountCredentials = () => {
+  return Boolean(
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim() ||
+      process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64?.trim() ||
+      process.env.GOOGLE_SERVICE_ACCOUNT_JSON_FILE?.trim() ||
+      process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.trim(),
+  );
+};
+
+const getServiceAccountAccessToken = async (): Promise<string | null> => {
+  const credentials = getServiceAccountCredentials();
+  if (!credentials) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+  if (serviceAccountTokenCache && serviceAccountTokenCache.expiresAt > now + 60) {
+    return serviceAccountTokenCache.accessToken;
+  }
+
+  const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = base64UrlEncode(
+    JSON.stringify({
+      iss: credentials.client_email,
+      scope: GOOGLE_SHEETS_SCOPES,
+      aud: GOOGLE_TOKEN_URI,
+      iat: now,
+      exp: now + 3600,
+    }),
+  );
+  const unsignedToken = `${header}.${payload}`;
+  const signer = createSign("RSA-SHA256");
+  signer.update(unsignedToken);
+  signer.end();
+  const assertion = `${unsignedToken}.${base64UrlEncode(signer.sign(credentials.private_key))}`;
+
+  const tokenResponse = await fetchWithTimeout(
+    GOOGLE_TOKEN_URI,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion,
+      }).toString(),
+    },
+    15000,
+  );
+
+  const tokenBody = await tokenResponse.json().catch(() => ({}));
+  if (!tokenResponse.ok || !tokenBody.access_token) {
+    const message = tokenBody?.error_description || tokenBody?.error || `HTTP ${tokenResponse.status}`;
+    throw new Error(`Não foi possível autenticar a conta de serviço: ${message}`);
+  }
+
+  serviceAccountTokenCache = {
+    accessToken: tokenBody.access_token,
+    expiresAt: now + Number(tokenBody.expires_in || 3600),
+  };
+  return tokenBody.access_token;
+};
 
 // Safe non-blocking fetch with timeout to prevent Google Sheets from hanging the server
 const fetchWithTimeout = async (url: string, options: any = {}, timeoutMs = 25000) => {
@@ -28,7 +147,7 @@ async function startServer() {
 
   // API Route: health check
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.json({ status: "ok", serviceAccountConfigured: hasServiceAccountCredentials() });
   });
 
   // API Route: debug save sheets
@@ -80,9 +199,24 @@ async function startServer() {
       }
 
       // Se for um link de arquivo arbitrário no Drive (ex: .csv compartilhado)
+      const authHeader = req.headers.authorization;
+      const userAccessToken = token || (authHeader && authHeader.startsWith("Bearer ")
+        ? authHeader.substring(7)
+        : null);
+      let serviceAccountAccessToken: string | null = null;
+      let serviceAccountError: Error | null = null;
+
+      try {
+        serviceAccountAccessToken = await getServiceAccountAccessToken();
+      } catch (error: any) {
+        serviceAccountError = error instanceof Error ? error : new Error(String(error));
+        console.error("Falha ao autenticar a conta de serviço:", serviceAccountError.message);
+      }
+
+      const accessToken = serviceAccountAccessToken || userAccessToken;
+      const accessTokenSource = serviceAccountAccessToken ? "service-account" : "oauth";
+
       if (isDriveFile) {
-        const authHeader = req.headers.authorization;
-        const accessToken = token || (authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null);
 
         if (accessToken) {
           try {
@@ -154,9 +288,6 @@ async function startServer() {
       let apiAuthError: any = null;
 
       // Se houver token de acesso, vamos usar a API oficial do Google Sheets v4 para obter as abas reais!
-      const authHeader = req.headers.authorization;
-      const accessToken = token || (authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null);
-
       if (accessToken) {
         try {
           // Obter dados da planilha (metadados para listar todas as abas e buscar por nome/id)
@@ -224,8 +355,6 @@ async function startServer() {
 
           const primarySheetName = sheetsList[0].properties.title;
           const defaultCsvText = sheetsResultMap[primarySheetName] || "";
-
-          logSheetsData(sheetsResultMap);
 
           try {
             fs.writeFileSync("last_sync_debug.json", JSON.stringify(sheetsResultMap, null, 2));
@@ -338,6 +467,11 @@ async function startServer() {
             error: apiAuthError.userMessage || "Sua conexão com o Google expirou. É necessário fazer login novamente.",
             action: apiAuthError.action || "LOGOUT",
             googleError: apiAuthError.googleError,
+          });
+        }
+        if (serviceAccountError && !userAccessToken) {
+          return res.status(500).json({
+            error: "A conta de serviço está configurada, mas não pôde ser autenticada. Verifique o arquivo JSON no ambiente do servidor.",
           });
         }
         return res.status(400).json({ 

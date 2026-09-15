@@ -9,3 +9,8 @@ supabase/.branches
 supabase/.temp
 
 .vite/
+
+# Never commit Google service-account credentials.
+produtividade-p-sep-ar-6d12e0c0bc7a.json
+*.service-account.json
+last_sync_debug.json
